@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
     gtk_main();
 
     if (app.program) glDeleteProgram(app.program);
-    g_free(app.shader_code); g_free(app.shader_title); g_free(app.shader_id); g_free(app.shader_path);
+    g_free(app.shader_code); g_free(app.shader_title); g_free(app.shader_id); g_free(app.shader_path); g_free(app.constants_source); if (app.constants) g_ptr_array_free(app.constants, TRUE);
     curl_global_cleanup();
     return 0;
 }

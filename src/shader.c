@@ -4,6 +4,79 @@
 #include <stdio.h>
 #include <string.h>
 
+typedef struct { App *app; char *type, *name, *default_value; GtkWidget *entry; } ShaderConstant;
+
+static gboolean constants_update_timeout(gpointer data);
+static void constant_value_changed(GtkEditable *editable, App *app);
+static void reset_one_constant(GtkButton *button, ShaderConstant *constant);
+
+static void shader_constant_free(ShaderConstant *constant) {
+    g_free(constant->type); g_free(constant->name); g_free(constant->default_value); g_free(constant);
+}
+
+static ShaderConstant *find_shader_constant(App *app, const char *name) {
+    if (!app->constants) return NULL;
+    for (guint i = 0; i < app->constants->len; i++) { ShaderConstant *constant = g_ptr_array_index(app->constants, i); if (!strcmp(constant->name, name)) return constant; }
+    return NULL;
+}
+
+static void clear_constant_controls(App *app) {
+    if (app->constants_update_id) { g_source_remove(app->constants_update_id); app->constants_update_id = 0; }
+    if (app->constants_box) { GList *children = gtk_container_get_children(GTK_CONTAINER(app->constants_box)); for (GList *l = children; l; l = l->next) gtk_widget_destroy(l->data); g_list_free(children); }
+    if (!app->constants) app->constants = g_ptr_array_new_with_free_func((GDestroyNotify)shader_constant_free); else g_ptr_array_set_size(app->constants, 0);
+}
+
+static void rebuild_constant_controls(App *app, const char *source) {
+    clear_constant_controls(app); g_free(app->constants_source); app->constants_source = g_strdup(source);
+    GRegex *regex = g_regex_new("^[[:space:]]*const[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*([^;\\n]+)", G_REGEX_MULTILINE, 0, NULL); GMatchInfo *matches = NULL; g_regex_match(regex, source, 0, &matches);
+    while (g_match_info_matches(matches)) {
+        char *type = g_match_info_fetch(matches, 1), *name = g_match_info_fetch(matches, 2), *value = g_match_info_fetch(matches, 3); g_strstrip(value);
+        if (!find_shader_constant(app, name)) {
+            ShaderConstant *constant = g_new0(ShaderConstant, 1); constant->app = app; constant->type = type; constant->name = name; constant->default_value = value; g_ptr_array_add(app->constants, constant);
+            if (app->constants_box) { GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); GtkWidget *label = gtk_label_new(NULL); char *label_text = g_strdup_printf("%s (%s)", name, type); gtk_label_set_text(GTK_LABEL(label), label_text); g_free(label_text); gtk_widget_set_halign(label, GTK_ALIGN_START); gtk_widget_set_hexpand(row, TRUE); gtk_box_pack_start(GTK_BOX(row), label, TRUE, TRUE, 0); constant->entry = gtk_entry_new(); gtk_entry_set_text(GTK_ENTRY(constant->entry), value); gtk_entry_set_width_chars(GTK_ENTRY(constant->entry), 12); g_signal_connect(constant->entry, "changed", G_CALLBACK(constant_value_changed), app); gtk_box_pack_start(GTK_BOX(row), constant->entry, FALSE, FALSE, 0); GtkWidget *reset = gtk_button_new_with_label("Reset"); gtk_widget_set_tooltip_text(reset, "Reset this value"); g_signal_connect(reset, "clicked", G_CALLBACK(reset_one_constant), constant); gtk_box_pack_start(GTK_BOX(row), reset, FALSE, FALSE, 0); guint index = app->constants->len - 1; gtk_grid_attach(GTK_GRID(app->constants_box), row, index % 2, index / 2, 1, 1); }
+        } else { g_free(type); g_free(name); g_free(value); }
+        g_match_info_next(matches, NULL);
+    }
+    g_match_info_free(matches); g_regex_unref(regex);
+    if (app->constants_box && app->constants->len == 0) { GtkWidget *empty = gtk_label_new("No editable const values"); gtk_style_context_add_class(gtk_widget_get_style_context(empty), "muted"); gtk_widget_set_halign(empty, GTK_ALIGN_START); gtk_grid_attach(GTK_GRID(app->constants_box), empty, 0, 0, 2, 1); }
+    if (app->constants_box) gtk_widget_show_all(app->constants_box);
+}
+
+static char *constant_source_with_values(App *app) {
+    if (!app->constants_source) return NULL;
+    GRegex *regex = g_regex_new("^[[:space:]]*const[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*([^;\\n]+)", G_REGEX_MULTILINE, 0, NULL); GString *result = g_string_new(NULL); char **lines = g_strsplit(app->constants_source, "\\n", -1);
+    for (gsize i = 0; lines[i]; i++) { GMatchInfo *matches = NULL; if (g_regex_match(regex, lines[i], 0, &matches)) { char *name = g_match_info_fetch(matches, 2); ShaderConstant *constant = find_shader_constant(app, name); if (constant && constant->entry) { const char *equals = strchr(lines[i], '='); const char *semicolon = strrchr(lines[i], ';'); if (equals && semicolon && semicolon > equals) { g_string_append_len(result, lines[i], (gssize)(equals - lines[i] + 1)); g_string_append(result, gtk_entry_get_text(GTK_ENTRY(constant->entry))); g_string_append(result, semicolon); } else g_string_append(result, lines[i]); } else g_string_append(result, lines[i]); g_free(name); } else g_string_append(result, lines[i]); if (lines[i + 1]) g_string_append_c(result, '\n'); if (matches) g_match_info_free(matches); }
+    g_strfreev(lines); g_regex_unref(regex); return g_string_free(result, FALSE);
+}
+
+gboolean update_shader_source(App *app, const char *source) {
+    gtk_gl_area_make_current(GTK_GL_AREA(app->preview)); if (gtk_gl_area_get_error(GTK_GL_AREA(app->preview))) return FALSE;
+    char *error = NULL; GLuint program = make_program_for_shader(source, app->shader_path, &error); if (!program) { char *message = g_strdup_printf("Shader error: %s", error ? error : "unknown"); set_status(app, message); g_free(message); g_free(error); return FALSE; }
+    if (app->shader_path && g_file_test(app->shader_path, G_FILE_TEST_IS_REGULAR)) { GError *write_error = NULL; if (!g_file_set_contents(app->shader_path, source, -1, &write_error)) { set_status(app, write_error->message); g_error_free(write_error); glDeleteProgram(program); return FALSE; } }
+    if (app->program) glDeleteProgram(app->program);
+    app->program = program;
+    g_free(app->shader_code); app->shader_code = g_strdup(source);
+    char *last_shader = data_path("last.frag"); g_file_set_contents(last_shader, source, -1, NULL); g_free(last_shader); char *message = g_strdup_printf("Updated · %s", app->shader_title ? app->shader_title : "Shader"); set_status(app, message); g_free(message); gtk_gl_area_queue_render(GTK_GL_AREA(app->preview)); return TRUE;
+}
+
+void apply_constants_clicked(GtkButton *button, App *app) {
+    (void)button; if (app->constants_update_id) { g_source_remove(app->constants_update_id); app->constants_update_id = 0; } char *source = constant_source_with_values(app); if (source) { update_shader_source(app, source); g_free(source); }
+}
+
+void reset_constants_clicked(GtkButton *button, App *app) {
+    (void)button; if (!app->constants) return; for (guint i = 0; i < app->constants->len; i++) { ShaderConstant *constant = g_ptr_array_index(app->constants, i); if (constant->entry) gtk_entry_set_text(GTK_ENTRY(constant->entry), constant->default_value); } apply_constants_clicked(NULL, app);
+}
+
+static gboolean constants_update_timeout(gpointer data) { App *app = data; app->constants_update_id = 0; apply_constants_clicked(NULL, app); return G_SOURCE_REMOVE; }
+
+static void constant_value_changed(GtkEditable *editable, App *app) {
+    (void)editable; if (app->constants_update_id) g_source_remove(app->constants_update_id); app->constants_update_id = g_timeout_add(300, constants_update_timeout, app);
+}
+
+static void reset_one_constant(GtkButton *button, ShaderConstant *constant) {
+    (void)button; gtk_entry_set_text(GTK_ENTRY(constant->entry), constant->default_value); apply_constants_clicked(NULL, constant->app);
+}
+
 static void load_channel_types(const char *shader_path, int types[4]) {
     for (int i = 0; i < 4; i++) types[i] = CHANNEL_2D;
     if (!shader_path) return;
@@ -211,6 +284,7 @@ gboolean load_preview(App *app, const char *source, const char *title, const cha
     app->program = program; g_free(app->shader_code); app->shader_code = g_strdup(source);
     g_free(app->shader_title); app->shader_title = g_strdup(title ? title : "Untitled shader");
     g_free(app->shader_id); app->shader_id = g_strdup(id ? id : "");
+    rebuild_constant_controls(app, source);
     free_shader_channels(app->channel_textures); load_shader_channels(app->shader_path, app->channel_textures, app->channel_widths, app->channel_heights, app->channel_types);
     char *last_shader = data_path("last.frag"); char *last_title = data_path("last.title"); char *last_id = data_path("last.id"); char *last_path = data_path("last.path");
     g_file_set_contents(last_shader, source, -1, NULL); g_file_set_contents(last_title, app->shader_title, -1, NULL); g_file_set_contents(last_id, app->shader_id, -1, NULL);
@@ -259,12 +333,17 @@ static gboolean thumb_render(GtkGLArea *area, GdkGLContext *context, ShaderThumb
 
 static gboolean thumb_tick(GtkGLArea *area) { if (gtk_widget_get_realized(GTK_WIDGET(area))) gtk_gl_area_queue_render(area); return G_SOURCE_CONTINUE; }
 
+static void thumb_destroy(GtkWidget *widget, gpointer data) {
+    (void)data; guint source = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(widget), "thumb-timer"));
+    if (source) { g_source_remove(source); g_object_set_data(G_OBJECT(widget), "thumb-timer", NULL); }
+}
+
 GtkWidget *shader_row(const char *title, const char *subtitle, const char *source, const char *shader_path) {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     if (source) {
         GtkWidget *thumb_area = gtk_gl_area_new(); ShaderThumb *thumb = g_new0(ShaderThumb, 1); thumb->source = g_strdup(source); thumb->path = g_strdup(shader_path);
         gtk_widget_set_size_request(thumb_area, 175, 82); gtk_style_context_add_class(gtk_widget_get_style_context(thumb_area), "thumb"); g_object_set_data_full(G_OBJECT(thumb_area), "shader-thumb", thumb, (GDestroyNotify)thumb_free);
-        g_signal_connect(thumb_area, "realize", G_CALLBACK(thumb_realize), thumb); g_signal_connect(thumb_area, "unrealize", G_CALLBACK(thumb_unrealize), thumb); g_signal_connect(thumb_area, "render", G_CALLBACK(thumb_render), thumb); g_timeout_add(33, (GSourceFunc)thumb_tick, thumb_area); gtk_box_pack_start(GTK_BOX(box), thumb_area, FALSE, FALSE, 0);
+        g_signal_connect(thumb_area, "realize", G_CALLBACK(thumb_realize), thumb); g_signal_connect(thumb_area, "unrealize", G_CALLBACK(thumb_unrealize), thumb); g_signal_connect(thumb_area, "render", G_CALLBACK(thumb_render), thumb); g_signal_connect(thumb_area, "destroy", G_CALLBACK(thumb_destroy), NULL); guint timer = g_timeout_add(33, (GSourceFunc)thumb_tick, thumb_area); g_object_set_data(G_OBJECT(thumb_area), "thumb-timer", GUINT_TO_POINTER(timer)); gtk_box_pack_start(GTK_BOX(box), thumb_area, FALSE, FALSE, 0);
     }
     GtkWidget *name = gtk_label_new(title); GtkWidget *sub = gtk_label_new(subtitle ? subtitle : "");
     gtk_widget_set_halign(name, GTK_ALIGN_START); gtk_widget_set_halign(sub, GTK_ALIGN_START);

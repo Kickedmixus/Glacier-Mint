@@ -24,8 +24,10 @@ typedef struct { char *code, *title, *id; } ShaderLoad;
 
 typedef struct {
     GtkWidget *window, *notebook, *preview, *results, *local_list, *status;
-    GtkWidget *search, *api_key, *fps, *scale, *code_view, *browser, *browser_url;
-    char *shader_code, *shader_title, *shader_id, *shader_path;
+    GtkWidget *search, *api_key, *fps, *scale, *code_view, *browser, *browser_url, *constants_box;
+    char *shader_code, *shader_title, *shader_id, *shader_path, *constants_source;
+    GPtrArray *constants;
+    guint constants_update_id;
     GLuint channel_textures[4];
     int channel_widths[4], channel_heights[4], channel_types[4];
     GLuint program, vao;
@@ -46,6 +48,9 @@ GLuint make_program(const char *user_source, char **error);
 GLuint make_program_for_shader(const char *user_source, const char *shader_path, char **error);
 void set_uniforms(GLuint program, float width, float height, float time_s, int frame);
 gboolean load_preview(App *app, const char *source, const char *title, const char *id);
+gboolean update_shader_source(App *app, const char *source);
+void apply_constants_clicked(GtkButton *button, App *app);
+void reset_constants_clicked(GtkButton *button, App *app);
 GtkWidget *shader_row(const char *title, const char *subtitle, const char *source, const char *shader_path);
 void free_shader_channels(GLuint textures[4]);
 gboolean load_shader_channels(const char *shader_path, GLuint textures[4], int widths[4], int heights[4], int types[4]);

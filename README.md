@@ -1,5 +1,5 @@
 # Glacier Mint
-<img width="5000" height="800" alt="image" src="https://github.com/user-attachments/assets/3eca2a0d-1ca1-4712-b5b5-33223d2d226a" />
+![alt text](image.png)
 A small C/GTK shader wallpaper manager for Linux Mint Cinnamon on X11. It previews Shadertoy-style fragment shaders with the standard `iTime`, `iResolution`, `iBeat`, and audio uniform names, then runs the selected shader in a desktop-type OpenGL window behind the icons. It also mirrors occasional frames into the X11 root wallpaper so Cinnamon’s workspace overview shows the shader instead of the old static image.
 
 ## Source layout
