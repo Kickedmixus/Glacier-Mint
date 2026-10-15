@@ -16,6 +16,8 @@
 #define APP_ID "glacier-mint"
 #define LOGO_FILE "logo1600x.png"
 #define API_ROOT "https://www.shadertoy.com/api/v1"
+#define CHANNEL_2D 0
+#define CHANNEL_CUBE 1
 
 typedef struct { char *id, *title, *author; } ShaderResult;
 typedef struct { char *code, *title, *id; } ShaderLoad;
@@ -24,6 +26,8 @@ typedef struct {
     GtkWidget *window, *notebook, *preview, *results, *local_list, *status;
     GtkWidget *search, *api_key, *fps, *scale, *code_view, *browser, *browser_url;
     char *shader_code, *shader_title, *shader_id, *shader_path;
+    GLuint channel_textures[4];
+    int channel_widths[4], channel_heights[4], channel_types[4];
     GLuint program, vao;
     gint64 started;
     gboolean preview_ready;
@@ -32,16 +36,20 @@ typedef struct {
 typedef struct { App *app; char *query; char *key; } SearchJob;
 typedef struct { App *app; GPtrArray *items; char *error; } SearchDone;
 typedef struct { App *app; char *id; char *key; } LoadJob;
-typedef struct { App *app; char *id; char *code; char *title; char *error; } LoadDone;
-typedef struct { char *source; GLuint program, vao; gint64 started; } ShaderThumb;
+typedef struct { App *app; char *id; char *code; char *title; char *channels_json; char *error; } LoadDone;
+typedef struct { char *source, *path; GLuint program, vao, channel_textures[4]; int channel_widths[4], channel_heights[4], channel_types[4]; gint64 started; } ShaderThumb;
 
 void set_status(App *app, const char *text);
 char *read_file(const char *path);
 
 GLuint make_program(const char *user_source, char **error);
+GLuint make_program_for_shader(const char *user_source, const char *shader_path, char **error);
 void set_uniforms(GLuint program, float width, float height, float time_s, int frame);
 gboolean load_preview(App *app, const char *source, const char *title, const char *id);
-GtkWidget *shader_row(const char *title, const char *subtitle, const char *source);
+GtkWidget *shader_row(const char *title, const char *subtitle, const char *source, const char *shader_path);
+void free_shader_channels(GLuint textures[4]);
+gboolean load_shader_channels(const char *shader_path, GLuint textures[4], int widths[4], int heights[4], int types[4]);
+void bind_shader_channels(GLuint program, GLuint textures[4], const int widths[4], const int heights[4], const int types[4]);
 void preview_realize(GtkGLArea *area, App *app);
 gboolean preview_render(GtkGLArea *area, GdkGLContext *context, App *app);
 gboolean tick_preview(App *app);
@@ -54,6 +62,8 @@ char *logo_path(void);
 GtkFlowBoxChild *add_wallpaper_card(App *app, const char *path);
 void populate_local(App *app);
 void import_shader(App *app, const char *source, const char *title, const char *id);
+void import_shader_with_channels(App *app, const char *source, const char *title, const char *id, const char *channels_json);
+void remove_shader_storage(const char *shader_path);
 gboolean restore_last_shader(App *app);
 
 void stop_wallpaper(void);

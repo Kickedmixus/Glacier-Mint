@@ -18,14 +18,14 @@ make
 ./glacier-mint
 ```
 
-The Wallpapers tab starts empty. Import shaders through the embedded browser or paste code; imported files are saved under `~/.local/share/glacier-mint/wallpapers/`. The embedded browser works without an API key. For the optional REST search path, create a Shadertoy app key and either enter it in Settings or run:
+The Wallpapers tab starts empty. Import shaders through the embedded browser or paste code; each imported shader is saved in its own folder under `~/.local/share/glacier-mint/wallpapers/`, along with downloaded texture channel files and metadata. The embedded browser works without an API key. For the optional REST search path, create a Shadertoy app key and either enter it in Settings or run:
 
 ```sh
 export SHADERTOY_API_KEY=your-key
 ./glacier-mint
 ```
 
-The API only exposes shaders marked `public + api`; this is a Shadertoy access rule, not a limitation imposed by Glacier Mint. The current implementation uses the first `Image` render pass and does not yet download channel textures or audio inputs, so complex multi-pass shaders may not compile. The wallpaper process supplies zero audio values but keeps the standard audio uniform names for compatibility.
+The API only exposes shaders marked `public + api`; this is a Shadertoy access rule, not a limitation imposed by Glacier Mint. Glacier Mint uses the first `Image` render pass and supports downloaded 2D texture channels. Complex multi-pass, cubemap, video, and audio inputs may not compile or animate identically. The wallpaper process supplies zero audio values but keeps the standard audio uniform names for compatibility.
 
 Wayland sessions are not supported by the desktop-window backend; use an X11 session in Linux Mint.
 

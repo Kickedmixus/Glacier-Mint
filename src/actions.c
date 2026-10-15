@@ -11,8 +11,9 @@ void stop_wallpaper(void) {
 
 void apply_clicked(GtkButton *button, App *app) {
     (void)button; if (!app->shader_code) { set_status(app, "Choose a shader first"); return; }
-    char *path = data_path("current.frag"), *pid_path = data_path("wallpaper.pid"); GError *error = NULL;
-    if (!g_file_set_contents(path, app->shader_code, -1, &error)) { set_status(app, error->message); g_error_free(error); g_free(path); g_free(pid_path); return; }
+    gboolean saved_shader = app->shader_path && g_file_test(app->shader_path, G_FILE_TEST_IS_REGULAR); char *path = saved_shader ? g_strdup(app->shader_path) : data_path("current.frag");
+    char *pid_path = data_path("wallpaper.pid"); GError *error = NULL;
+    if (!saved_shader && !g_file_set_contents(path, app->shader_code, -1, &error)) { set_status(app, error->message); g_error_free(error); g_free(path); g_free(pid_path); return; }
     stop_wallpaper(); char *exe = self_executable(); const char *fps = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->fps));
     char *argv[] = { exe, "--wallpaper", path, "--fps", (char *)(fps ? fps : "30"), NULL }; GPid pid = 0;
     if (!g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, &pid, &error)) {
@@ -30,10 +31,10 @@ void open_clicked(GtkButton *button, App *app) {
 
 void delete_selected_clicked(GtkButton *button, App *app) {
     (void)button; if (!app->shader_path || !g_file_test(app->shader_path, G_FILE_TEST_EXISTS)) { set_status(app, "Select a saved wallpaper first"); return; }
-    char *dir = wallpapers_dir(); gboolean owned = g_str_has_prefix(app->shader_path, dir); g_free(dir); if (!owned) { set_status(app, "Only saved wallpapers can be deleted"); return; }
+    char *dir = wallpapers_dir(); gsize dir_len = strlen(dir); gboolean owned = g_str_has_prefix(app->shader_path, dir) && (app->shader_path[dir_len] == G_DIR_SEPARATOR || app->shader_path[dir_len] == '\0'); g_free(dir); if (!owned) { set_status(app, "Only saved wallpapers can be deleted"); return; }
     char *deleted_title = g_strdup(app->shader_title ? app->shader_title : "Wallpaper"); GList *children = gtk_container_get_children(GTK_CONTAINER(app->local_list));
     for (GList *l = children; l; l = l->next) { const char *path = g_object_get_data(G_OBJECT(l->data), "shader-path"); if (path && !g_strcmp0(path, app->shader_path)) { gtk_widget_destroy(GTK_WIDGET(l->data)); break; } } g_list_free(children);
-    g_remove(app->shader_path); g_free(app->shader_path); app->shader_path = NULL; if (app->program) { gtk_gl_area_make_current(GTK_GL_AREA(app->preview)); glDeleteProgram(app->program); app->program = 0; } g_clear_pointer(&app->shader_code, g_free); g_clear_pointer(&app->shader_title, g_free); g_clear_pointer(&app->shader_id, g_free);
+    remove_shader_storage(app->shader_path); g_free(app->shader_path); app->shader_path = NULL; if (app->program) { gtk_gl_area_make_current(GTK_GL_AREA(app->preview)); glDeleteProgram(app->program); app->program = 0; } gtk_gl_area_make_current(GTK_GL_AREA(app->preview)); free_shader_channels(app->channel_textures); g_clear_pointer(&app->shader_code, g_free); g_clear_pointer(&app->shader_title, g_free); g_clear_pointer(&app->shader_id, g_free);
     char *last = data_path("last.frag"), *title = data_path("last.title"), *id = data_path("last.id"), *path = data_path("last.path"); g_remove(last); g_remove(title); g_remove(id); g_remove(path); g_free(last); g_free(title); g_free(id); g_free(path); char *message = g_strdup_printf("Deleted · %s", deleted_title); set_status(app, message); g_free(message); g_free(deleted_title); gtk_gl_area_queue_render(GTK_GL_AREA(app->preview));
 }
 
