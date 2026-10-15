@@ -2,6 +2,10 @@
 
 A small C/GTK shader wallpaper manager for Linux Mint Cinnamon on X11. It previews Shadertoy-style fragment shaders with the standard `iTime`, `iResolution`, `iBeat`, and audio uniform names, then runs the selected shader in a desktop-type OpenGL window behind the icons. It also mirrors occasional frames into the X11 root wallpaper so Cinnamon’s workspace overview shows the shader instead of the old static image.
 
+## Source layout
+
+The implementation is split by responsibility: `shader.c` handles GLSL and previews, `storage.c` handles saved wallpapers and assets, `network.c` handles Shadertoy API work, `browser.c` handles WebKit integration, `ui.c` builds the GTK interface, `actions.c` contains UI actions, and `wallpaper.c` owns the X11 desktop backend. Shared types and interfaces live in `app.h`; `main.c` only initializes the app and dispatches wallpaper mode.
+
 The UI has three tabs: local wallpapers in a scrollable grid, an embedded Shadertoy browser with an injected import button plus paste-code fallback, and settings. The last loaded shader is restored on startup.
 
 ## Build and run
