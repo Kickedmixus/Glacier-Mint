@@ -9,6 +9,7 @@ typedef struct { App *app; char *type, *name, *default_value; GtkWidget *entry; 
 static gboolean constants_update_timeout(gpointer data);
 static void constant_value_changed(GtkEditable *editable, App *app);
 static void reset_one_constant(GtkButton *button, ShaderConstant *constant);
+static void load_widget_program(App *app);
 
 static void shader_constant_free(ShaderConstant *constant) {
     g_free(constant->type); g_free(constant->name); g_free(constant->default_value); g_free(constant);
@@ -56,7 +57,7 @@ gboolean update_shader_source(App *app, const char *source) {
     if (app->program) glDeleteProgram(app->program);
     app->program = program;
     g_free(app->shader_code); app->shader_code = g_strdup(source);
-    char *last_shader = data_path("last.frag"); g_file_set_contents(last_shader, source, -1, NULL); g_free(last_shader); char *message = g_strdup_printf("Updated · %s", app->shader_title ? app->shader_title : "Shader"); set_status(app, message); g_free(message); gtk_gl_area_queue_render(GTK_GL_AREA(app->preview)); return TRUE;
+    char *last_shader = data_path("last.frag"); g_file_set_contents(last_shader, source, -1, NULL); g_free(last_shader); char *message = g_strdup_printf("Updated · %s", app->shader_title ? app->shader_title : "Shader"); set_status(app, message); g_free(message); gtk_gl_area_queue_render(GTK_GL_AREA(app->preview)); load_widget_program(app); return TRUE;
 }
 
 void apply_constants_clicked(GtkButton *button, App *app) {
@@ -256,6 +257,46 @@ void preview_realize(GtkGLArea *area, App *app) {
     app->preview_ready = TRUE;
 }
 
+static void load_widget_program(App *app) {
+    if (!app->widget_preview_ready || !app->shader_code) return;
+    gtk_gl_area_make_current(GTK_GL_AREA(app->widget_preview));
+    if (gtk_gl_area_get_error(GTK_GL_AREA(app->widget_preview))) return;
+    char *error = NULL; GLuint program = make_program_for_shader(app->shader_code, app->shader_path, &error);
+    g_free(error);
+    if (!program) return;
+    if (app->widget_program) glDeleteProgram(app->widget_program);
+    app->widget_program = program;
+    free_shader_channels(app->widget_channel_textures);
+    load_shader_channels(app->shader_path, app->widget_channel_textures, app->widget_channel_widths, app->widget_channel_heights, app->widget_channel_types);
+    gtk_gl_area_queue_render(GTK_GL_AREA(app->widget_preview));
+}
+
+void widget_preview_realize(GtkGLArea *area, App *app) {
+    gtk_gl_area_make_current(area);
+    if (gtk_gl_area_get_error(area)) return;
+    glGenVertexArrays(1, &app->widget_vao); glBindVertexArray(app->widget_vao);
+    app->widget_preview_ready = TRUE;
+    load_widget_program(app);
+}
+
+void clear_widget_preview(App *app) {
+    if (!app->widget_preview_ready || !app->widget_preview) return;
+    gtk_gl_area_make_current(GTK_GL_AREA(app->widget_preview));
+    if (gtk_gl_area_get_error(GTK_GL_AREA(app->widget_preview))) return;
+    if (app->widget_program) glDeleteProgram(app->widget_program);
+    app->widget_program = 0;
+    free_shader_channels(app->widget_channel_textures);
+    gtk_gl_area_queue_render(GTK_GL_AREA(app->widget_preview));
+}
+
+void widget_preview_unrealize(GtkGLArea *area, App *app) {
+    (void)area;
+    clear_widget_preview(app);
+    if (app->widget_vao) glDeleteVertexArrays(1, &app->widget_vao);
+    app->widget_preview_ready = FALSE;
+    app->widget_vao = 0;
+}
+
 gboolean preview_render(GtkGLArea *area, GdkGLContext *context, App *app) {
     (void)context;
     if (!app->preview_ready || !app->program) return TRUE;
@@ -268,7 +309,23 @@ gboolean preview_render(GtkGLArea *area, GdkGLContext *context, App *app) {
     return TRUE;
 }
 
-gboolean tick_preview(App *app) { gtk_gl_area_queue_render(GTK_GL_AREA(app->preview)); return G_SOURCE_CONTINUE; }
+gboolean widget_preview_render(GtkGLArea *area, GdkGLContext *context, App *app) {
+    (void)context;
+    int width = gtk_widget_get_allocated_width(GTK_WIDGET(area));
+    int height = gtk_widget_get_allocated_height(GTK_WIDGET(area));
+    glViewport(0, 0, width, height); glClearColor(0.025f, 0.035f, 0.06f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+    if (!app->widget_preview_ready || !app->widget_program) return TRUE;
+    float elapsed = (float)(g_get_monotonic_time() - app->started) / 1000000.0f;
+    glUseProgram(app->widget_program); set_uniforms(app->widget_program, width, height, elapsed, (int)(elapsed * 60)); bind_shader_channels(app->widget_program, app->widget_channel_textures, app->widget_channel_widths, app->widget_channel_heights, app->widget_channel_types);
+    glBindVertexArray(app->widget_vao); glDrawArrays(GL_TRIANGLES, 0, 3);
+    return TRUE;
+}
+
+gboolean tick_preview(App *app) {
+    if (app->preview) gtk_gl_area_queue_render(GTK_GL_AREA(app->preview));
+    if (app->widget_preview) gtk_gl_area_queue_render(GTK_GL_AREA(app->widget_preview));
+    return G_SOURCE_CONTINUE;
+}
 
 gboolean load_preview(App *app, const char *source, const char *title, const char *id) {
     if (!source) return FALSE;
@@ -291,6 +348,7 @@ gboolean load_preview(App *app, const char *source, const char *title, const cha
     g_file_set_contents(last_path, app->shader_path ? app->shader_path : "", -1, NULL); g_free(last_shader); g_free(last_title); g_free(last_id); g_free(last_path);
     char *message = g_strdup_printf("Ready · %s", app->shader_title); set_status(app, message); g_free(message);
     gtk_gl_area_queue_render(GTK_GL_AREA(app->preview));
+    load_widget_program(app);
     return TRUE;
 }
 

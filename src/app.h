@@ -23,16 +23,22 @@ typedef struct { char *id, *title, *author; } ShaderResult;
 typedef struct { char *code, *title, *id; } ShaderLoad;
 
 typedef struct {
-    GtkWidget *window, *notebook, *preview, *results, *local_list, *status;
+    GtkWidget *window, *notebook, *preview, *widget_canvas, *widget_preview, *widget_grid, *widget_settings_panel, *widget_settings_name, *widget_settings_format, *widget_settings_font, *widget_settings_size, *widget_settings_width, *widget_settings_bold, *widget_settings_italic, *widget_settings_gradient, *widget_settings_color, *widget_settings_gradient_color, *widget_settings_box, *widget_settings_box_color, *widget_settings_border, *widget_settings_radius, *widget_settings_spacing, *widget_settings_stretch_x, *widget_settings_stretch_y, *results, *local_list, *status;
     GtkWidget *search, *api_key, *fps, *scale, *code_view, *browser, *browser_url, *constants_box;
     char *shader_code, *shader_title, *shader_id, *shader_path, *constants_source;
     GPtrArray *constants;
+    GPtrArray *wallpaper_widgets;
     guint constants_update_id;
+    guint widget_clock_id;
     GLuint channel_textures[4];
     int channel_widths[4], channel_heights[4], channel_types[4];
     GLuint program, vao;
+    GLuint widget_program, widget_vao, widget_channel_textures[4];
+    int widget_channel_widths[4], widget_channel_heights[4], widget_channel_types[4];
     gint64 started;
-    gboolean preview_ready;
+    gboolean preview_ready, widget_preview_ready, widget_settings_updating;
+    GtkWidget *selected_widget;
+    int widget_screen_width, widget_screen_height;
 } App;
 
 typedef struct { App *app; char *query; char *key; } SearchJob;
@@ -57,6 +63,10 @@ gboolean load_shader_channels(const char *shader_path, GLuint textures[4], int w
 void bind_shader_channels(GLuint program, GLuint textures[4], const int widths[4], const int heights[4], const int types[4]);
 void preview_realize(GtkGLArea *area, App *app);
 gboolean preview_render(GtkGLArea *area, GdkGLContext *context, App *app);
+void widget_preview_realize(GtkGLArea *area, App *app);
+void widget_preview_unrealize(GtkGLArea *area, App *app);
+gboolean widget_preview_render(GtkGLArea *area, GdkGLContext *context, App *app);
+void clear_widget_preview(App *app);
 gboolean tick_preview(App *app);
 void local_row_activated(GtkFlowBox *box, GtkFlowBoxChild *row, App *app);
 
