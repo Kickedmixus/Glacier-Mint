@@ -11,8 +11,11 @@ const char *browser_import_script =
     "document.querySelectorAll('[contenteditable=true]').forEach(function(e){if(e.innerText)a.push(e.innerText);});"
     "document.querySelectorAll('pre').forEach(function(e){if(e.innerText)a.push(e.innerText);});"
     "return a.find(function(x){return x.indexOf('mainImage')>=0;});}"
-    "function channels(){var out=[],st=window.gShaderToy,e=st&&st.mEffect,passes=e&&(e.mPasses||e.mPass)||[];"
-    "if(!passes.length&&st&&st.mPass)passes=st.mPass; var pass=passes.find(function(p){return String(p.mType).toLowerCase()==='image';})||passes[0];"
+    "function passes(){var st=window.gShaderToy,e=st&&st.mEffect,p=e&&(e.mPasses||e.mPass)||[];if(!p.length&&st&&st.mPass)p=st.mPass;return Array.prototype.slice.call(p);}"
+    "function kind(p){return String(p&&p.mType).toLowerCase();}"
+    "function image(){var p=passes().find(function(p){return kind(p)==='image';});return p&&typeof p.mSource==='string'&&p.mSource.indexOf('mainImage')>=0?p.mSource:source();}"
+    "function common(){return passes().filter(function(p){return kind(p)==='common'&&typeof p.mSource==='string';}).map(function(p){return p.mSource+'\\n';}).join('');}"
+    "function channels(){var out=[],list=passes(),pass=list.find(function(p){return kind(p)==='image';})||list[0];"
     "if(!pass)return out; (pass.mInputs||[]).forEach(function(input,i){"
     "var info=input&&input.mInfo,src=info&&(info.mSrc||info.mPath||info.mURL);"
     "if(!src||typeof src!=='string'||src.indexOf('data:')===0)return;"
@@ -23,9 +26,9 @@ const char *browser_import_script =
     "function encode(b){var a=new Uint8Array(b),s='';for(var i=0;i<a.length;i++)s+=String.fromCharCode(a[i]);return btoa(s);}"
     "function channelData(list){return Promise.all(list.map(function(c){var urls=String(c.type).toLowerCase()==='cubemap'?cubeUrls(c.src):[c.src];return Promise.all(urls.map(function(u){return fetch(u,{credentials:'include'}).then(function(r){if(!r.ok)throw Error('HTTP '+r.status);return r.arrayBuffer();}).then(encode);})).then(function(data){c.data=urls.length>1?data:data[0];return c;}).catch(function(){return c;});}));}"
     "function add(){if(document.getElementById('glacier-import'))return;var b=document.createElement('button');"
-    "b.id='glacier-import';b.textContent='Import shader into Glacier Mint';b.onclick=function(){var c=source();"
-    "if(!c){send({error:'Open the shader Image code editor first, then try again.'});return;}"
-    "var cs=channels();b.disabled=true;b.textContent='Downloading channels…';channelData(cs).then(function(done){send({code:c,title:(window.gShaderToy&&window.gShaderToy.mInfo&&window.gShaderToy.mInfo.name)||document.title,id:(location.pathname.match(/\\/view\\/([^/?]+)/)||[])[1]||'',channels:done});b.disabled=false;b.textContent='Import shader into Glacier Mint';}).catch(function(){send({code:c,title:document.title,id:'',channels:cs});b.disabled=false;b.textContent='Import shader into Glacier Mint';});};"
+    "b.id='glacier-import';b.textContent='Import shader into Glacier Mint';b.onclick=function(){try{var c=image();"
+    "if(!c){send({error:'Open a shader page first, then try again.'});return;}"
+    "c=common()+c;var cs=channels();b.disabled=true;b.textContent='Downloading channels…';channelData(cs).then(function(done){send({code:c,title:(window.gShaderToy&&window.gShaderToy.mInfo&&window.gShaderToy.mInfo.name)||document.title,id:(location.pathname.match(/\\/view\\/([^/?]+)/)||[])[1]||'',channels:done});b.disabled=false;b.textContent='Import shader into Glacier Mint';}).catch(function(){send({code:c,title:document.title,id:'',channels:cs});b.disabled=false;b.textContent='Import shader into Glacier Mint';});}catch(x){send({error:'Import failed: '+x.message});}};"
     "b.style='position:fixed;z-index:2147483647;right:18px;top:18px;padding:10px 14px;background:#a9e0ef;color:#071014;border:1px solid #071014;font:600 14px sans-serif;cursor:pointer';"
     "document.body.appendChild(b);}"
     "add();new MutationObserver(add).observe(document.documentElement,{childList:true,subtree:true});"
@@ -34,9 +37,9 @@ const char *browser_import_script =
 void browser_message(WebKitUserContentManager *manager, WebKitJavascriptResult *result, App *app) {
     (void)manager; JSCValue *value = webkit_javascript_result_get_js_value(result); char *message = jsc_value_to_string(value); JsonParser *parser = json_parser_new();
     if (json_parser_load_from_data(parser, message, -1, NULL)) { JsonObject *obj = json_node_get_object(json_parser_get_root(parser)); JsonNode *error = json_object_get_member(obj, "error"); JsonNode *code = json_object_get_member(obj, "code");
-        if (error && JSON_NODE_HOLDS_VALUE(error)) set_status(app, json_node_get_string(error)); else if (code && JSON_NODE_HOLDS_VALUE(code)) { const char *title = "Imported Shadertoy shader"; const char *id = ""; JsonNode *title_node = json_object_get_member(obj, "title"), *id_node = json_object_get_member(obj, "id"), *channels = json_object_get_member(obj, "channels"); if (title_node && JSON_NODE_HOLDS_VALUE(title_node)) title = json_node_get_string(title_node); if (id_node && JSON_NODE_HOLDS_VALUE(id_node)) id = json_node_get_string(id_node); char *channels_json = NULL; if (channels && JSON_NODE_HOLDS_ARRAY(channels)) { JsonGenerator *generator = json_generator_new(); json_generator_set_root(generator, channels); channels_json = json_generator_to_data(generator, NULL); g_object_unref(generator); } import_shader_with_channels(app, json_node_get_string(code), title, id, channels_json); g_free(channels_json); gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), 0); }
+        if (error && JSON_NODE_HOLDS_VALUE(error)) set_status(app, json_node_get_string(error)); else if (code && JSON_NODE_HOLDS_VALUE(code)) { const char *title = "Imported Shadertoy shader"; const char *id = ""; JsonNode *title_node = json_object_get_member(obj, "title"), *id_node = json_object_get_member(obj, "id"), *channels = json_object_get_member(obj, "channels"); if (title_node && JSON_NODE_HOLDS_VALUE(title_node)) title = json_node_get_string(title_node); if (id_node && JSON_NODE_HOLDS_VALUE(id_node)) id = json_node_get_string(id_node); char *channels_json = NULL; if (channels && JSON_NODE_HOLDS_ARRAY(channels)) { JsonGenerator *generator = json_generator_new(); json_generator_set_root(generator, channels); channels_json = json_generator_to_data(generator, NULL); g_object_unref(generator); } gboolean imported = import_shader_with_channels(app, json_node_get_string(code), title, id, channels_json); g_free(channels_json); if (imported) gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), 0); }
     }
-    g_object_unref(parser); g_free(message); webkit_javascript_result_unref(result);
+    g_object_unref(parser); g_free(message);
 }
 
 static void browser_go(App *app) {

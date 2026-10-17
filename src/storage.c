@@ -6,6 +6,7 @@
 
 void set_status(App *app, const char *text) {
     gtk_label_set_text(GTK_LABEL(app->status), text);
+    if (app->toy_status) gtk_label_set_text(GTK_LABEL(app->toy_status), text);
 }
 
 char *read_file(const char *path) {
@@ -106,20 +107,21 @@ void remove_shader_storage(const char *shader_path) {
     char *folder = g_path_get_dirname(shader_path); if (g_str_has_suffix(shader_path, "shader.frag")) remove_tree(folder); else g_remove(shader_path); g_free(folder);
 }
 
-void import_shader(App *app, const char *source, const char *title, const char *id) {
-    import_shader_with_channels(app, source, title, id, NULL);
+gboolean import_shader(App *app, const char *source, const char *title, const char *id) {
+    return import_shader_with_channels(app, source, title, id, NULL);
 }
 
-void import_shader_with_channels(App *app, const char *source, const char *title, const char *id, const char *channels_json) {
-    if (!source || !source[0]) return;
+gboolean import_shader_with_channels(App *app, const char *source, const char *title, const char *id, const char *channels_json) {
+    if (!source || !source[0]) return FALSE;
     char *dir = wallpapers_dir(); char *slug = g_strdup(title && title[0] ? title : "Imported shader"); g_strdelimit(slug, " /-", '_'); if (!slug[0]) { g_free(slug); slug = g_strdup("Imported_shader"); }
     char *folder_name = g_strdup_printf("%s-%" G_GINT64_FORMAT, slug, g_get_real_time()); char *folder = g_build_filename(dir, folder_name, NULL); char *path = g_build_filename(folder, "shader.frag", NULL); g_mkdir_with_parents(folder, 0700); GError *error = NULL;
-    if (!g_file_set_contents(path, source, -1, &error)) { set_status(app, error->message); g_error_free(error); remove_tree(folder); g_free(dir); g_free(slug); g_free(folder_name); g_free(folder); g_free(path); return; }
+    if (!g_file_set_contents(path, source, -1, &error)) { set_status(app, error->message); g_error_free(error); remove_tree(folder); g_free(dir); g_free(slug); g_free(folder_name); g_free(folder); g_free(path); return FALSE; }
     char *title_path = g_build_filename(folder, "title.txt", NULL); g_file_set_contents(title_path, title && title[0] ? title : "Imported shader", -1, NULL); g_free(title_path); gboolean missing_channels = save_channel_manifest(folder, channels_json, app);
     g_free(app->shader_path); app->shader_path = g_strdup(path);
-    if (!load_preview(app, source, title, id)) { remove_tree(folder); g_free(app->shader_path); app->shader_path = NULL; }
+    gboolean imported = load_preview(app, source, title, id);
+    if (!imported) { remove_tree(folder); g_free(app->shader_path); app->shader_path = NULL; }
     else { GtkFlowBoxChild *row = add_wallpaper_card(app, path); if (row) gtk_flow_box_select_child(GTK_FLOW_BOX(app->local_list), row); if (missing_channels) set_status(app, "Imported shader; one or more channels could not be downloaded"); }
-    g_free(dir); g_free(slug); g_free(folder_name); g_free(folder); g_free(path);
+    g_free(dir); g_free(slug); g_free(folder_name); g_free(folder); g_free(path); return imported;
 }
 
 gboolean restore_last_shader(App *app) {

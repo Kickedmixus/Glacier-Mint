@@ -4,10 +4,11 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--restore")) return restore_wallpaper();
     if (argc >= 3 && !strcmp(argv[1], "--wallpaper")) {
-        int fps = 30;
-        for (int i = 3; i + 1 < argc; i++) if (!strcmp(argv[i], "--fps")) fps = atoi(argv[i + 1]);
-        return wallpaper_main(argv[2], fps);
+        int fps = 30; gboolean vsync = TRUE;
+        for (int i = 3; i + 1 < argc; i++) { if (!strcmp(argv[i], "--fps")) fps = atoi(argv[i + 1]); else if (!strcmp(argv[i], "--vsync")) vsync = atoi(argv[i + 1]) != 0; }
+        return wallpaper_main(argv[2], CLAMP(fps, 1, 240), vsync);
     }
 
     gtk_init(&argc, &argv);

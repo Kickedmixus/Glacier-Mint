@@ -48,122 +48,61 @@ static GtkWidget *brand_header(const char *text) {
     g_free(path); GtkWidget *label = gtk_label_new(text); gtk_widget_set_halign(label, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(label), "brand"); gtk_box_pack_start(GTK_BOX(header), label, FALSE, FALSE, 0); return header;
 }
 
-static int widget_int(GtkWidget *widget, const char *key, int fallback) {
-    gpointer value = g_object_get_data(G_OBJECT(widget), key);
-    return value ? GPOINTER_TO_INT(value) : fallback;
+static DeskWidget *desk_of(GtkWidget *box) { return box ? g_object_get_data(G_OBJECT(box), "desk-widget") : NULL; }
+
+static gboolean is_live_widget(App *app, GtkWidget *box) { guint index; return box && app->wallpaper_widgets && g_ptr_array_find(app->wallpaper_widgets, box, &index); }
+
+/* The canvas shows the whole screen shrunk down, so widgets are drawn at canvas size / screen size. */
+static double preview_scale(App *app, gboolean vertical) {
+    int canvas = vertical ? gtk_widget_get_allocated_height(app->widget_canvas) : gtk_widget_get_allocated_width(app->widget_canvas), screen = vertical ? app->widget_screen_height : app->widget_screen_width;
+    return canvas > 1 ? (double)canvas / MAX(1, screen) : 1.0;
 }
 
-static float *widget_rgba(GtkWidget *widget, const char *key) {
-    return g_object_get_data(G_OBJECT(widget), key);
+static gboolean draw_wallpaper_widget(GtkWidget *area, cairo_t *cr, GtkWidget *box) {
+    (void)area; App *app = g_object_get_data(G_OBJECT(box), "widget-app"); DeskWidget *widget = desk_of(box); if (!app || !widget) return FALSE;
+    cairo_save(cr); cairo_scale(cr, preview_scale(app, FALSE), preview_scale(app, TRUE)); desk_widget_draw(cr, widget, &app->widget_snapshot); cairo_restore(cr); return FALSE;
 }
 
-static void widget_text(GtkWidget *widget, const struct tm *local_time, char *text, gsize length) {
-    const char *kind = g_object_get_data(G_OBJECT(widget), "widget-kind");
-    const char *format = g_object_get_data(G_OBJECT(widget), "widget-format");
-    if (!g_strcmp0(kind, "time")) strftime(text, length, g_strcmp0(format, "12") ? "%H:%M" : "%I:%M %p", local_time);
-    else strftime(text, length, !g_strcmp0(format, "short") ? "%Y-%m-%d" : "%A, %B %d", local_time);
+static void refresh_widget_size(App *app, GtkWidget *box) {
+    GtkWidget *area = g_object_get_data(G_OBJECT(box), "widget-label"); int width, height; desk_widget_measure(desk_of(box), &app->widget_snapshot, &width, &height);
+    gtk_widget_set_size_request(area, MAX(1, (int)ceil(width * preview_scale(app, FALSE))), MAX(1, (int)ceil(height * preview_scale(app, TRUE)))); gtk_widget_queue_draw(area);
 }
 
-static int widget_character_count(const char *text) { return MAX(1, (int)g_utf8_strlen(text ? text : "", -1)); }
-
-static double widget_text_advance(cairo_t *cr, const char *text, int spacing) {
-    cairo_text_extents_t ext; cairo_text_extents(cr, text, &ext); return ext.x_advance + MAX(0, widget_character_count(text) - 1) * spacing;
-}
-
-static void widget_text_path(cairo_t *cr, const char *text, int spacing) {
-    double x = 0; const char *cursor = text;
-    while (cursor && *cursor) {
-        gunichar character = g_utf8_get_char(cursor); char part[8]; int length = g_unichar_to_utf8(character, part); part[length] = '\0'; cairo_move_to(cr, x, 0); cairo_text_path(cr, part);
-        cairo_text_extents_t ext; cairo_text_extents(cr, part, &ext); x += ext.x_advance + spacing; cursor = g_utf8_next_char(cursor);
-    }
-}
-
-static gboolean draw_wallpaper_widget(GtkWidget *area, cairo_t *cr, GtkWidget *widget) {
-    int area_width = gtk_widget_get_allocated_width(area), area_height = gtk_widget_get_allocated_height(area);
-    const char *text = g_object_get_data(G_OBJECT(widget), "widget-text"); const char *font = g_object_get_data(G_OBJECT(widget), "widget-font");
-    int font_size = widget_int(widget, "widget-size", 32); gboolean bold = widget_int(widget, "widget-bold", TRUE), italic = widget_int(widget, "widget-italic", FALSE);
-    int padding = 8, spacing = widget_int(widget, "widget-spacing", 0); double stretch_x = widget_int(widget, "widget-stretch-x", 100) / 100.0, stretch_y = widget_int(widget, "widget-stretch-y", 100) / 100.0; double *preview_scale_x = g_object_get_data(G_OBJECT(widget), "widget-preview-scale-x"), *preview_scale_y = g_object_get_data(G_OBJECT(widget), "widget-preview-scale-y"); double render_scale_x = (preview_scale_x ? *preview_scale_x : 1.0) * stretch_x, render_scale_y = (preview_scale_y ? *preview_scale_y : 1.0) * stretch_y;
-    float *text_color = widget_rgba(widget, "widget-color"), *gradient_color = widget_rgba(widget, "widget-gradient-color");
-    if (!text || !font || !text_color || !gradient_color) return FALSE;
-    int width = MAX(1, (int)ceil(area_width / render_scale_x)), height = MAX(1, (int)ceil(area_height / render_scale_y)); cairo_save(cr); cairo_scale(cr, render_scale_x, render_scale_y);
-    cairo_select_font_face(cr, font, italic ? CAIRO_FONT_SLANT_ITALIC : CAIRO_FONT_SLANT_NORMAL, bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL); cairo_set_font_size(cr, font_size);
-    cairo_text_extents_t ext; cairo_font_extents_t metrics; cairo_text_extents(cr, text, &ext); cairo_font_extents(cr, &metrics); double x = padding, y = padding + (height - padding * 2 - metrics.height) / 2.0 + metrics.height;
-    cairo_save(cr); cairo_translate(cr, x, y);
-    if (widget_int(widget, "widget-gradient", FALSE)) {
-        double angle = widget_int(widget, "widget-gradient-angle", 0) * G_PI / 180.0, cx = width / 2.0 - x, cy = height / 2.0 - y, dx = cos(angle) * width / 2.0, dy = sin(angle) * height / 2.0;
-        widget_text_path(cr, text, spacing); cairo_pattern_t *gradient = cairo_pattern_create_linear(cx - dx, cy - dy, cx + dx, cy + dy); cairo_pattern_add_color_stop_rgba(gradient, 0, text_color[0], text_color[1], text_color[2], text_color[3]); cairo_pattern_add_color_stop_rgba(gradient, 1, gradient_color[0], gradient_color[1], gradient_color[2], gradient_color[3]); cairo_set_source(cr, gradient); cairo_fill(cr); cairo_pattern_destroy(gradient);
-    } else { widget_text_path(cr, text, spacing); cairo_set_source_rgba(cr, text_color[0], text_color[1], text_color[2], text_color[3]); cairo_fill(cr); }
-    cairo_restore(cr); cairo_restore(cr);
-    return FALSE;
-}
-
-static void update_widget_label(GtkWidget *widget, const struct tm *local_time) {
-    GtkWidget *area = g_object_get_data(G_OBJECT(widget), "widget-label"); char text[96]; widget_text(widget, local_time, text, sizeof(text));
-    g_object_set_data_full(G_OBJECT(widget), "widget-text", g_strdup(text), g_free);
-    const char *font = g_object_get_data(G_OBJECT(widget), "widget-font"); int font_size = widget_int(widget, "widget-size", 32), padding = 8, spacing = widget_int(widget, "widget-spacing", 0); double stretch_x = widget_int(widget, "widget-stretch-x", 100) / 100.0, stretch_y = widget_int(widget, "widget-stretch-y", 100) / 100.0; double *preview_scale_x = g_object_get_data(G_OBJECT(widget), "widget-preview-scale-x"), *preview_scale_y = g_object_get_data(G_OBJECT(widget), "widget-preview-scale-y"); double scale_x = preview_scale_x ? *preview_scale_x : 1.0, scale_y = preview_scale_y ? *preview_scale_y : 1.0;
-    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1); cairo_t *cr = cairo_create(surface); cairo_select_font_face(cr, font ? font : "Sans", widget_int(widget, "widget-italic", FALSE) ? CAIRO_FONT_SLANT_ITALIC : CAIRO_FONT_SLANT_NORMAL, widget_int(widget, "widget-bold", TRUE) ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL); cairo_set_font_size(cr, font_size); cairo_text_extents_t ext; cairo_font_extents_t metrics; cairo_text_extents(cr, text, &ext); cairo_font_extents(cr, &metrics); double text_width = widget_text_advance(cr, text, spacing); cairo_destroy(cr); cairo_surface_destroy(surface);
-    int base_width = MAX(widget_int(widget, "widget-width", 0), MAX(1, (int)ceil(text_width + padding * 2))); int base_height = MAX(1, (int)ceil(metrics.height + padding * 2)); gtk_widget_set_size_request(area, MAX(1, (int)ceil(base_width * scale_x * stretch_x)), MAX(1, (int)ceil(base_height * scale_y * stretch_y))); gtk_widget_queue_draw(area);
-}
-
+/* Runs every 33 ms; each widget redraws only when its own refresh interval has passed. */
 static gboolean update_widget_labels(gpointer data) {
-    App *app = data; time_t now = time(NULL); struct tm local_time;
-    localtime_r(&now, &local_time);
-    if (app->wallpaper_widgets) for (guint i = 0; i < app->wallpaper_widgets->len; i++) { GtkWidget *widget = g_ptr_array_index(app->wallpaper_widgets, i); double *scale_x = g_new(double, 1), *scale_y = g_new(double, 1); int canvas_width = gtk_widget_get_allocated_width(app->widget_canvas), canvas_height = gtk_widget_get_allocated_height(app->widget_canvas); *scale_x = canvas_width > 0 ? (double)canvas_width / MAX(1, app->widget_screen_width) : 1.0; *scale_y = canvas_height > 0 ? (double)canvas_height / MAX(1, app->widget_screen_height) : 1.0; g_object_set_data_full(G_OBJECT(widget), "widget-preview-scale-x", scale_x, g_free); g_object_set_data_full(G_OBJECT(widget), "widget-preview-scale-y", scale_y, g_free); update_widget_label(widget, &local_time); }
+    App *app = data; gint64 now = g_get_real_time() / 1000; gboolean fresh = FALSE;
+    for (guint i = 0; app->wallpaper_widgets && i < app->wallpaper_widgets->len; i++) {
+        GtkWidget *box = g_ptr_array_index(app->wallpaper_widgets, i); gint64 *last = g_object_get_data(G_OBJECT(box), "widget-bucket"), bucket = now / desk_widget_refresh_ms(desk_of(box));
+        if (*last == bucket) continue;
+        if (!fresh) { widget_snapshot_clear(&app->widget_snapshot); widget_feed_snapshot(app->widget_feed, &app->widget_snapshot); fresh = TRUE; }
+        *last = bucket; refresh_widget_size(app, box);
+    }
     return G_SOURCE_CONTINUE;
 }
 
-static void set_widget_rgba(GtkWidget *widget, const char *key, float r, float g, float b, float a) {
-    float *color = g_new(float, 4); color[0] = r; color[1] = g; color[2] = b; color[3] = a; g_object_set_data_full(G_OBJECT(widget), key, color, g_free);
+static void invalidate_wallpaper_widgets(App *app) {
+    for (guint i = 0; app->wallpaper_widgets && i < app->wallpaper_widgets->len; i++) { gint64 *bucket = g_object_get_data(G_OBJECT(g_ptr_array_index(app->wallpaper_widgets, i)), "widget-bucket"); *bucket = -1; }
 }
 
-static void set_widget_style_defaults(GtkWidget *widget, const char *kind) {
-    g_object_set_data_full(G_OBJECT(widget), "widget-font", g_strdup("Sans"), g_free); g_object_set_data(G_OBJECT(widget), "widget-size", GINT_TO_POINTER(!g_strcmp0(kind, "time") ? 48 : 26));
-    g_object_set_data(G_OBJECT(widget), "widget-bold", GINT_TO_POINTER(TRUE)); g_object_set_data(G_OBJECT(widget), "widget-italic", GINT_TO_POINTER(FALSE));
-    set_widget_rgba(widget, "widget-color", 0.90f, 0.96f, 0.98f, 1.0f); set_widget_rgba(widget, "widget-gradient-color", 0.45f, 0.80f, 1.0f, 1.0f);
-    g_object_set_data(G_OBJECT(widget), "widget-gradient", GINT_TO_POINTER(FALSE)); g_object_set_data(G_OBJECT(widget), "widget-box", GINT_TO_POINTER(FALSE)); set_widget_rgba(widget, "widget-box-color", 0.01f, 0.03f, 0.05f, 0.0f); set_widget_rgba(widget, "widget-glow-color", 0.45f, 0.80f, 1.0f, 1.0f);
-    g_object_set_data(G_OBJECT(widget), "widget-border", GINT_TO_POINTER(0)); g_object_set_data(G_OBJECT(widget), "widget-radius", GINT_TO_POINTER(0)); g_object_set_data(G_OBJECT(widget), "widget-glow", GINT_TO_POINTER(FALSE)); g_object_set_data(G_OBJECT(widget), "widget-glow-blur", GINT_TO_POINTER(12)); g_object_set_data(G_OBJECT(widget), "widget-glow-opacity", GINT_TO_POINTER(55)); g_object_set_data(G_OBJECT(widget), "widget-width", GINT_TO_POINTER(0)); g_object_set_data(G_OBJECT(widget), "widget-spacing", GINT_TO_POINTER(0)); g_object_set_data(G_OBJECT(widget), "widget-stretch-x", GINT_TO_POINTER(100)); g_object_set_data(G_OBJECT(widget), "widget-stretch-y", GINT_TO_POINTER(100)); g_object_set_data(G_OBJECT(widget), "widget-gradient-angle", GINT_TO_POINTER(0));
-}
-
-static void apply_widget_style_line(GtkWidget *widget, const char *line) {
-    char kind[16], format[16], font[32] = "Sans"; double x, y; int size = widget_int(widget, "widget-size", 32), bold = TRUE, italic = FALSE, gradient = FALSE, box = FALSE, border = 0, radius = 0, glow = FALSE, glow_blur = 12, widget_width = 0, gradient_angle = 0, glow_opacity = 55, spacing = 0, stretch_x = 100, stretch_y = 100;
-    float text_r = 0.90f, text_g = 0.96f, text_b = 0.98f, text_a = 1.0f, grad_r = 0.45f, grad_g = 0.80f, grad_b = 1.0f, grad_a = 1.0f, box_r = 0.01f, box_g = 0.03f, box_b = 0.05f, box_a = 0.0f, glow_r = 0.45f, glow_g = 0.80f, glow_b = 1.0f, glow_a = 1.0f;
-    int fields = sscanf(line, "%15s %lf %lf %15s %31s %d %d %d %f %f %f %f %d %f %f %f %f %d %f %f %f %f %d %d %d %d %d %d %d %d %d %d %f %f %f %f", kind, &x, &y, format, font, &size, &bold, &italic, &text_r, &text_g, &text_b, &text_a, &gradient, &grad_r, &grad_g, &grad_b, &grad_a, &box, &box_r, &box_g, &box_b, &box_a, &border, &radius, &glow, &glow_blur, &widget_width, &gradient_angle, &glow_opacity, &spacing, &stretch_x, &stretch_y, &glow_r, &glow_g, &glow_b, &glow_a);
-    if (fields < 5) return;
-    for (char *p = font; *p; p++) if (*p == '_') *p = ' ';
-    g_object_set_data_full(G_OBJECT(widget), "widget-font", g_strdup(font), g_free); g_object_set_data(G_OBJECT(widget), "widget-size", GINT_TO_POINTER(CLAMP(size, 8, 160))); g_object_set_data(G_OBJECT(widget), "widget-bold", GINT_TO_POINTER(!!bold)); g_object_set_data(G_OBJECT(widget), "widget-italic", GINT_TO_POINTER(!!italic));
-    if (fields >= 12) set_widget_rgba(widget, "widget-color", text_r, text_g, text_b, text_a);
-    if (fields >= 17) { g_object_set_data(G_OBJECT(widget), "widget-gradient", GINT_TO_POINTER(!!gradient)); set_widget_rgba(widget, "widget-gradient-color", grad_r, grad_g, grad_b, grad_a); }
-    if (fields >= 22) { g_object_set_data(G_OBJECT(widget), "widget-box", GINT_TO_POINTER(FALSE)); set_widget_rgba(widget, "widget-box-color", box_r, box_g, box_b, 0.0f); }
-    if (fields >= 23) g_object_set_data(G_OBJECT(widget), "widget-border", GINT_TO_POINTER(0));
-    if (fields >= 24) g_object_set_data(G_OBJECT(widget), "widget-radius", GINT_TO_POINTER(0));
-    if (fields >= 26) { g_object_set_data(G_OBJECT(widget), "widget-glow", GINT_TO_POINTER(!!glow)); g_object_set_data(G_OBJECT(widget), "widget-glow-blur", GINT_TO_POINTER(CLAMP(glow_blur, 1, 80))); }
-    if (fields >= 27) g_object_set_data(G_OBJECT(widget), "widget-width", GINT_TO_POINTER(CLAMP(widget_width, 0, 1600)));
-    if (fields >= 28) g_object_set_data(G_OBJECT(widget), "widget-gradient-angle", GINT_TO_POINTER(fields == 28 && gradient_angle <= 4 ? 0 : ((gradient_angle % 360) + 360) % 360));
-    if (fields >= 29) g_object_set_data(G_OBJECT(widget), "widget-glow-opacity", GINT_TO_POINTER(CLAMP(glow_opacity, 0, 100)));
-    if (fields >= 30) g_object_set_data(G_OBJECT(widget), "widget-spacing", GINT_TO_POINTER(CLAMP(spacing, 0, 40)));
-    if (fields >= 31) g_object_set_data(G_OBJECT(widget), "widget-stretch-x", GINT_TO_POINTER(CLAMP(stretch_x, 50, 200)));
-    if (fields >= 32) g_object_set_data(G_OBJECT(widget), "widget-stretch-y", GINT_TO_POINTER(CLAMP(stretch_y, 50, 200)));
-    if (fields >= 36) set_widget_rgba(widget, "widget-glow-color", glow_r, glow_g, glow_b, glow_a);
+static GPtrArray *desk_widget_list(App *app) {
+    GPtrArray *list = g_ptr_array_new(); for (guint i = 0; app->wallpaper_widgets && i < app->wallpaper_widgets->len; i++) g_ptr_array_add(list, desk_of(g_ptr_array_index(app->wallpaper_widgets, i)));
+    return list;
 }
 
 static void save_wallpaper_widgets(App *app) {
     if (!app->wallpaper_widgets) return;
-    GString *contents = g_string_new(NULL);
-    for (guint i = 0; i < app->wallpaper_widgets->len; i++) {
-        GtkWidget *widget = g_ptr_array_index(app->wallpaper_widgets, i); const char *kind = g_object_get_data(G_OBJECT(widget), "widget-kind"), *format = g_object_get_data(G_OBJECT(widget), "widget-format"), *font = g_object_get_data(G_OBJECT(widget), "widget-font"); char font_token[64] = "Sans"; if (font) g_strlcpy(font_token, font, sizeof(font_token)); for (char *p = font_token; *p; p++) if (*p == ' ') *p = '_'; double *x = g_object_get_data(G_OBJECT(widget), "widget-x"), *y = g_object_get_data(G_OBJECT(widget), "widget-y"); float *text_color = widget_rgba(widget, "widget-color"), *gradient_color = widget_rgba(widget, "widget-gradient-color"), *box_color = widget_rgba(widget, "widget-box-color"), *glow_color = widget_rgba(widget, "widget-glow-color");
-        g_string_append_printf(contents, "%s %.6f %.6f %s %s %d %d %d %.3f %.3f %.3f %.3f %d %.3f %.3f %.3f %.3f %d %.3f %.3f %.3f %.3f %d %d %d %d %d %d %d %d %d %d %.3f %.3f %.3f %.3f\n", kind, x ? *x : 0.05, y ? *y : 0.05, format ? format : (!g_strcmp0(kind, "time") ? "24" : "long"), font_token, widget_int(widget, "widget-size", 32), widget_int(widget, "widget-bold", TRUE), widget_int(widget, "widget-italic", FALSE), text_color[0], text_color[1], text_color[2], text_color[3], widget_int(widget, "widget-gradient", FALSE), gradient_color[0], gradient_color[1], gradient_color[2], gradient_color[3], 0, box_color[0], box_color[1], box_color[2], 0.0, 0, 0, widget_int(widget, "widget-glow", FALSE), widget_int(widget, "widget-glow-blur", 12), widget_int(widget, "widget-width", 0), widget_int(widget, "widget-gradient-angle", 0), widget_int(widget, "widget-glow-opacity", 55), widget_int(widget, "widget-spacing", 0), widget_int(widget, "widget-stretch-x", 100), widget_int(widget, "widget-stretch-y", 100), glow_color[0], glow_color[1], glow_color[2], glow_color[3]);
-    }
-    char *path = data_path("widgets.conf"); g_file_set_contents(path, contents->str, -1, NULL); g_free(path); g_string_free(contents, TRUE);
+    GPtrArray *list = desk_widget_list(app); desk_widgets_save(list); g_ptr_array_free(list, TRUE);
 }
 
-static void set_widget_normalized_position(GtkWidget *widget, App *app, double x, double y) {
-    double *old_x = g_object_get_data(G_OBJECT(widget), "widget-x"), *old_y = g_object_get_data(G_OBJECT(widget), "widget-y");
-    if (!old_x) { old_x = g_new(double, 1); g_object_set_data_full(G_OBJECT(widget), "widget-x", old_x, g_free); }
-    if (!old_y) { old_y = g_new(double, 1); g_object_set_data_full(G_OBJECT(widget), "widget-y", old_y, g_free); }
-    *old_x = CLAMP(x, 0.0, 1.0); *old_y = CLAMP(y, 0.0, 1.0);
+static void sync_widget_feed(App *app) { GPtrArray *list = desk_widget_list(app); widget_feed_sync(app->widget_feed, list); g_ptr_array_free(list, TRUE); }
+
+static void wallpaper_widgets_changed(App *app) { sync_widget_feed(app); invalidate_wallpaper_widgets(app); update_widget_labels(app); save_wallpaper_widgets(app); }
+
+static void set_widget_normalized_position(GtkWidget *box, App *app, double x, double y) {
+    DeskWidget *widget = desk_of(box); widget->x = CLAMP(x, 0.0, 1.0); widget->y = CLAMP(y, 0.0, 1.0);
     int width = gtk_widget_get_allocated_width(app->widget_canvas), height = gtk_widget_get_allocated_height(app->widget_canvas);
-    if (width > 0) gtk_widget_set_margin_start(widget, (int)(*old_x * width));
-    if (height > 0) gtk_widget_set_margin_top(widget, (int)(*old_y * height));
+    if (width > 0) gtk_widget_set_margin_start(box, (int)(widget->x * width));
+    if (height > 0) gtk_widget_set_margin_top(box, (int)(widget->y * height));
 }
 
 static void snap_widget_position(App *app, GtkWidget *widget, int left, int top) {
@@ -188,23 +127,29 @@ static gboolean draw_widget_grid(GtkWidget *grid, cairo_t *cr, App *app) {
     cairo_stroke(cr); cairo_set_source_rgba(cr, 0.66, 0.88, 0.94, 0.55); cairo_move_to(cr, width / 2.0, 0); cairo_line_to(cr, width / 2.0, height); cairo_move_to(cr, 0, height / 2.0); cairo_line_to(cr, width, height / 2.0); cairo_stroke(cr); return FALSE;
 }
 
-static void position_wallpaper_widgets(GtkWidget *canvas, GtkAllocation *allocation, App *app) {
-    (void)canvas; (void)allocation;
-    for (guint i = 0; app->wallpaper_widgets && i < app->wallpaper_widgets->len; i++) {
-        GtkWidget *widget = g_ptr_array_index(app->wallpaper_widgets, i); double *x = g_object_get_data(G_OBJECT(widget), "widget-x"), *y = g_object_get_data(G_OBJECT(widget), "widget-y");
-        if (x && y) set_widget_normalized_position(widget, app, *x, *y);
-    }
+static gboolean reposition_wallpaper_widgets(gpointer data) {
+    App *app = data; g_object_set_data(G_OBJECT(app->widget_canvas), "reposition-pending", NULL);
+    for (guint i = 0; app->wallpaper_widgets && i < app->wallpaper_widgets->len; i++) { GtkWidget *box = g_ptr_array_index(app->wallpaper_widgets, i); DeskWidget *widget = desk_of(box); set_widget_normalized_position(box, app, widget->x, widget->y); }
+    invalidate_wallpaper_widgets(app); update_widget_labels(app); return G_SOURCE_REMOVE;
 }
 
-static void wallpaper_widget_map(GtkWidget *widget, App *app) {
-    double *x = g_object_get_data(G_OBJECT(widget), "widget-x"), *y = g_object_get_data(G_OBJECT(widget), "widget-y");
-    if (x && y) { snap_widget_position(app, widget, (int)(*x * gtk_widget_get_allocated_width(app->widget_canvas)), (int)(*y * gtk_widget_get_allocated_height(app->widget_canvas))); save_wallpaper_widgets(app); }
+/* Margins changed during an allocation are not applied until the next one, so move widgets from an idle callback. */
+static void position_wallpaper_widgets(GtkWidget *canvas, GtkAllocation *allocation, App *app) {
+    int size = allocation->width * 65536 + allocation->height;
+    if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(canvas), "canvas-size")) == size) return;
+    g_object_set_data(G_OBJECT(canvas), "canvas-size", GINT_TO_POINTER(size));
+    if (!g_object_get_data(G_OBJECT(canvas), "reposition-pending")) { g_object_set_data(G_OBJECT(canvas), "reposition-pending", GINT_TO_POINTER(TRUE)); g_idle_add(reposition_wallpaper_widgets, app); }
+}
+
+/* Only place the widget; snapping here would move saved widgets every time the editor opens. Dragging still snaps. */
+static void wallpaper_widget_map(GtkWidget *box, App *app) {
+    DeskWidget *widget = desk_of(box); set_widget_normalized_position(box, app, widget->x, widget->y);
 }
 
 static gboolean draw_widget_color_preview(GtkWidget *area, cairo_t *cr, App *app) {
-    GtkWidget *button = gtk_widget_get_parent(area); const char *key = g_object_get_data(G_OBJECT(button), "widget-color-key"); GtkWidget *widget = app->selected_widget; int width = gtk_widget_get_allocated_width(area), height = gtk_widget_get_allocated_height(area); if (!widget || !key) { cairo_set_source_rgb(cr, 0.12, 0.15, 0.16); cairo_paint(cr); return FALSE; }
-    const char *color_key = !strcmp(key, "widget-box-color") ? "widget-box-color" : !strcmp(key, "widget-glow-color") ? "widget-glow-color" : "widget-color"; float *start = widget_rgba(widget, color_key), *end = widget_rgba(widget, "widget-gradient-color"); cairo_pattern_t *pattern = NULL;
-    if (!strcmp(key, "widget-color") && widget_int(widget, "widget-gradient", FALSE)) { double angle = widget_int(widget, "widget-gradient-angle", 0) * G_PI / 180.0, cx = width / 2.0, cy = height / 2.0, dx = cos(angle) * width / 2.0, dy = sin(angle) * height / 2.0; pattern = cairo_pattern_create_linear(cx - dx, cy - dy, cx + dx, cy + dy); cairo_pattern_add_color_stop_rgba(pattern, 0, start[0], start[1], start[2], start[3]); cairo_pattern_add_color_stop_rgba(pattern, 1, end[0], end[1], end[2], end[3]); cairo_set_source(cr, pattern); } else cairo_set_source_rgba(cr, start[0], start[1], start[2], start[3]); cairo_rectangle(cr, 1, 1, MAX(1, width - 2), MAX(1, height - 2)); cairo_fill(cr); if (pattern) cairo_pattern_destroy(pattern); cairo_set_source_rgba(cr, 1, 1, 1, 0.55); cairo_set_line_width(cr, 1); cairo_rectangle(cr, 1, 1, MAX(1, width - 2), MAX(1, height - 2)); cairo_stroke(cr); return FALSE;
+    GtkWidget *button = gtk_widget_get_parent(area); const char *key = g_object_get_data(G_OBJECT(button), "widget-color-key"); DeskWidget *widget = desk_of(app->selected_widget); int width = gtk_widget_get_allocated_width(area), height = gtk_widget_get_allocated_height(area); if (!widget || !key) { cairo_set_source_rgb(cr, 0.12, 0.15, 0.16); cairo_paint(cr); return FALSE; }
+    float *start = desk_widget_color(widget, key), *end = widget->gradient_color; cairo_pattern_t *pattern = NULL;
+    if (!strcmp(key, "text") && widget->gradient) { double angle = widget->gradient_angle * G_PI / 180.0, cx = width / 2.0, cy = height / 2.0, dx = cos(angle) * width / 2.0, dy = sin(angle) * height / 2.0; pattern = cairo_pattern_create_linear(cx - dx, cy - dy, cx + dx, cy + dy); cairo_pattern_add_color_stop_rgba(pattern, 0, start[0], start[1], start[2], start[3]); cairo_pattern_add_color_stop_rgba(pattern, 1, end[0], end[1], end[2], end[3]); cairo_set_source(cr, pattern); } else cairo_set_source_rgba(cr, start[0], start[1], start[2], start[3]); cairo_rectangle(cr, 1, 1, MAX(1, width - 2), MAX(1, height - 2)); cairo_fill(cr); if (pattern) cairo_pattern_destroy(pattern); cairo_set_source_rgba(cr, 1, 1, 1, 0.55); cairo_set_line_width(cr, 1); cairo_rectangle(cr, 1, 1, MAX(1, width - 2), MAX(1, height - 2)); cairo_stroke(cr); return FALSE;
 }
 
 static GtkWidget *widget_color_button(App *app, const char *key) {
@@ -212,7 +157,7 @@ static GtkWidget *widget_color_button(App *app, const char *key) {
 }
 
 static void refresh_widget_color_previews(App *app) {
-    GtkWidget *buttons[] = { app->widget_settings_color }; for (guint i = 0; i < G_N_ELEMENTS(buttons); i++) if (buttons[i]) gtk_widget_queue_draw(gtk_bin_get_child(GTK_BIN(buttons[i])));
+    GtkWidget *buttons[] = { app->widget_settings_color, app->widget_settings_accent, app->widget_settings_secondary, app->widget_settings_box_color }; for (guint i = 0; i < G_N_ELEMENTS(buttons); i++) if (buttons[i]) gtk_widget_queue_draw(gtk_bin_get_child(GTK_BIN(buttons[i])));
 }
 
 typedef struct { App *app; GtkWidget *window, *list, *search, *target, *button; } FontPicker;
@@ -223,7 +168,7 @@ static gboolean font_row_filter(GtkListBoxRow *row, gpointer data) {
 
 static void font_row_activated(GtkListBox *list, GtkListBoxRow *row, FontPicker *picker) {
     (void)list; GtkWidget *label = gtk_bin_get_child(GTK_BIN(row)); const char *font = gtk_label_get_text(GTK_LABEL(label));
-    if (picker->target && picker->app->selected_widget) { g_object_set_data_full(G_OBJECT(picker->target), "widget-font", g_strdup(font), g_free); gtk_button_set_label(GTK_BUTTON(picker->button), font); update_widget_labels(picker->app); save_wallpaper_widgets(picker->app); }
+    if (is_live_widget(picker->app, picker->target)) { DeskWidget *widget = desk_of(picker->target); g_free(widget->font); widget->font = g_strdup(font); if (picker->target == picker->app->selected_widget) gtk_button_set_label(GTK_BUTTON(picker->button), font); wallpaper_widgets_changed(picker->app); }
     gtk_widget_destroy(picker->window);
 }
 
@@ -251,10 +196,10 @@ static void rgb_to_hsv(float r, float g, float b, float *h, float *s, float *v) 
 }
 
 static void picker_apply(ColorPicker *picker) {
-    if (!picker->target || !picker->app->selected_widget) return;
-    if (!strcmp(picker->key, "widget-color")) { set_widget_rgba(picker->target, "widget-color", picker->color[0], picker->color[1], picker->color[2], picker->color[3]); set_widget_rgba(picker->target, "widget-gradient-color", picker->gradient_color[0], picker->gradient_color[1], picker->gradient_color[2], picker->gradient_color[3]); }
-    else set_widget_rgba(picker->target, picker->key, picker->color[0], picker->color[1], picker->color[2], picker->color[3]);
-    update_widget_labels(picker->app); refresh_widget_color_previews(picker->app); save_wallpaper_widgets(picker->app);
+    if (!is_live_widget(picker->app, picker->target)) return;
+    DeskWidget *widget = desk_of(picker->target); memcpy(desk_widget_color(widget, picker->key), picker->color, sizeof(picker->color));
+    if (!strcmp(picker->key, "text")) memcpy(widget->gradient_color, picker->gradient_color, sizeof(picker->gradient_color));
+    refresh_widget_color_previews(picker->app); wallpaper_widgets_changed(picker->app);
 }
 
 static float *picker_area_color(ColorPicker *picker, GtkWidget *area) {
@@ -282,97 +227,119 @@ static void picker_angle_changed(GtkSpinButton *spin, ColorPicker *picker) {
     int angle = CLAMP(gtk_spin_button_get_value_as_int(spin), 0, 360); angle = (angle / 15) * 15;
     if (angle > 360) angle = 360;
     if (angle != gtk_spin_button_get_value_as_int(spin)) gtk_spin_button_set_value(spin, angle);
-    g_object_set_data(G_OBJECT(picker->target), "widget-gradient-angle", GINT_TO_POINTER(angle % 360)); refresh_widget_color_previews(picker->app); save_wallpaper_widgets(picker->app);
+    if (!is_live_widget(picker->app, picker->target)) return;
+    desk_of(picker->target)->gradient_angle = angle % 360; refresh_widget_color_previews(picker->app); wallpaper_widgets_changed(picker->app);
 }
-static void picker_gradient_toggled(GtkToggleButton *toggle, ColorPicker *picker) { gboolean active = gtk_toggle_button_get_active(toggle); g_object_set_data(G_OBJECT(picker->target), "widget-gradient", GINT_TO_POINTER(active)); if (picker->gradient_box) gtk_widget_set_visible(picker->gradient_box, active); update_widget_labels(picker->app); refresh_widget_color_previews(picker->app); save_wallpaper_widgets(picker->app); }
+static void picker_gradient_toggled(GtkToggleButton *toggle, ColorPicker *picker) { gboolean active = gtk_toggle_button_get_active(toggle); if (picker->gradient_box) gtk_widget_set_visible(picker->gradient_box, active); if (!is_live_widget(picker->app, picker->target)) return; desk_of(picker->target)->gradient = active; refresh_widget_color_previews(picker->app); wallpaper_widgets_changed(picker->app); }
 static void picker_destroy(GtkWidget *window, ColorPicker *picker) { (void)window; g_free(picker); }
+
+static const char *color_title(const char *key) { return !strcmp(key, "accent") ? "Accent color" : !strcmp(key, "secondary") ? "Secondary color" : !strcmp(key, "panel") ? "Background color" : "Widget text color"; }
 
 static void widget_color_button_clicked(GtkButton *button, App *app) {
     if (!app->selected_widget) return;
-    ColorPicker *picker = g_new0(ColorPicker, 1); picker->app = app; picker->target = app->selected_widget; g_strlcpy(picker->key, g_object_get_data(G_OBJECT(button), "widget-color-key"), sizeof(picker->key)); float *color = widget_rgba(picker->target, picker->key); memcpy(picker->color, color, sizeof(picker->color)); if (!strcmp(picker->key, "widget-color")) memcpy(picker->gradient_color, widget_rgba(picker->target, "widget-gradient-color"), sizeof(picker->gradient_color)); picker->window = gtk_window_new(GTK_WINDOW_TOPLEVEL); gtk_window_set_title(GTK_WINDOW(picker->window), !strcmp(picker->key, "widget-glow-color") ? "Glow color" : "Widget text color"); gtk_window_set_transient_for(GTK_WINDOW(picker->window), GTK_WINDOW(app->window)); gtk_window_set_default_size(GTK_WINDOW(picker->window), 360, 560);
+    ColorPicker *picker = g_new0(ColorPicker, 1); picker->app = app; picker->target = app->selected_widget; g_strlcpy(picker->key, g_object_get_data(G_OBJECT(button), "widget-color-key"), sizeof(picker->key)); DeskWidget *widget = desk_of(picker->target); memcpy(picker->color, desk_widget_color(widget, picker->key), sizeof(picker->color)); if (!strcmp(picker->key, "text")) memcpy(picker->gradient_color, widget->gradient_color, sizeof(picker->gradient_color)); picker->window = gtk_window_new(GTK_WINDOW_TOPLEVEL); gtk_window_set_title(GTK_WINDOW(picker->window), color_title(picker->key)); gtk_window_set_transient_for(GTK_WINDOW(picker->window), GTK_WINDOW(app->window)); gtk_window_set_default_size(GTK_WINDOW(picker->window), 360, 560);
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8); gtk_container_set_border_width(GTK_CONTAINER(outer), 12); gtk_container_add(GTK_CONTAINER(picker->window), outer); picker->sv_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->sv_area, -1, 230); gtk_widget_add_events(picker->sv_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(outer), picker->sv_area, TRUE, TRUE, 0); picker->hue_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->hue_area, -1, 24); gtk_widget_add_events(picker->hue_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(outer), picker->hue_area, FALSE, FALSE, 0); picker->alpha_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->alpha_area, -1, 20); gtk_widget_add_events(picker->alpha_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(outer), picker->alpha_area, FALSE, FALSE, 0);
-    if (!strcmp(picker->key, "widget-color")) { picker->gradient_toggle = gtk_check_button_new_with_label("Use gradient"); gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(picker->gradient_toggle), widget_int(picker->target, "widget-gradient", FALSE)); gtk_box_pack_start(GTK_BOX(outer), picker->gradient_toggle, FALSE, FALSE, 0); g_signal_connect(picker->gradient_toggle, "toggled", G_CALLBACK(picker_gradient_toggled), picker); picker->gradient_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5); gtk_box_pack_start(GTK_BOX(picker->gradient_box), gtk_label_new("Gradient color"), FALSE, FALSE, 0); picker->gradient_sv_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->gradient_sv_area, -1, 150); gtk_widget_add_events(picker->gradient_sv_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->gradient_sv_area, FALSE, FALSE, 0); picker->gradient_hue_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->gradient_hue_area, -1, 18); gtk_widget_add_events(picker->gradient_hue_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->gradient_hue_area, FALSE, FALSE, 0); picker->gradient_alpha_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->gradient_alpha_area, -1, 16); gtk_widget_add_events(picker->gradient_alpha_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->gradient_alpha_area, FALSE, FALSE, 0); GtkWidget *angle_label = gtk_label_new("Gradient angle (degrees)"); gtk_widget_set_halign(angle_label, GTK_ALIGN_START); gtk_box_pack_start(GTK_BOX(picker->gradient_box), angle_label, FALSE, FALSE, 0); picker->angle = gtk_spin_button_new_with_range(0, 360, 15); gtk_spin_button_set_digits(GTK_SPIN_BUTTON(picker->angle), 0); gtk_spin_button_set_value(GTK_SPIN_BUTTON(picker->angle), widget_int(picker->target, "widget-gradient-angle", 0)); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->angle, FALSE, FALSE, 0); g_signal_connect(picker->angle, "value-changed", G_CALLBACK(picker_angle_changed), picker); gtk_box_pack_start(GTK_BOX(outer), picker->gradient_box, FALSE, FALSE, 0); }
+    if (!strcmp(picker->key, "text")) { picker->gradient_toggle = gtk_check_button_new_with_label("Use gradient"); gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(picker->gradient_toggle), widget->gradient); gtk_box_pack_start(GTK_BOX(outer), picker->gradient_toggle, FALSE, FALSE, 0); g_signal_connect(picker->gradient_toggle, "toggled", G_CALLBACK(picker_gradient_toggled), picker); picker->gradient_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5); gtk_box_pack_start(GTK_BOX(picker->gradient_box), gtk_label_new("Gradient color"), FALSE, FALSE, 0); picker->gradient_sv_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->gradient_sv_area, -1, 150); gtk_widget_add_events(picker->gradient_sv_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->gradient_sv_area, FALSE, FALSE, 0); picker->gradient_hue_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->gradient_hue_area, -1, 18); gtk_widget_add_events(picker->gradient_hue_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->gradient_hue_area, FALSE, FALSE, 0); picker->gradient_alpha_area = gtk_drawing_area_new(); gtk_widget_set_size_request(picker->gradient_alpha_area, -1, 16); gtk_widget_add_events(picker->gradient_alpha_area, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->gradient_alpha_area, FALSE, FALSE, 0); GtkWidget *angle_label = gtk_label_new("Gradient angle (degrees)"); gtk_widget_set_halign(angle_label, GTK_ALIGN_START); gtk_box_pack_start(GTK_BOX(picker->gradient_box), angle_label, FALSE, FALSE, 0); picker->angle = gtk_spin_button_new_with_range(0, 360, 15); gtk_spin_button_set_digits(GTK_SPIN_BUTTON(picker->angle), 0); gtk_spin_button_set_value(GTK_SPIN_BUTTON(picker->angle), widget->gradient_angle); gtk_box_pack_start(GTK_BOX(picker->gradient_box), picker->angle, FALSE, FALSE, 0); g_signal_connect(picker->angle, "value-changed", G_CALLBACK(picker_angle_changed), picker); gtk_box_pack_start(GTK_BOX(outer), picker->gradient_box, FALSE, FALSE, 0); }
     g_signal_connect(picker->sv_area, "draw", G_CALLBACK(picker_draw), picker); g_signal_connect(picker->hue_area, "draw", G_CALLBACK(picker_draw), picker); g_signal_connect(picker->alpha_area, "draw", G_CALLBACK(picker_draw), picker); g_signal_connect(picker->sv_area, "motion-notify-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->hue_area, "motion-notify-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->alpha_area, "motion-notify-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->sv_area, "button-press-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->hue_area, "button-press-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->alpha_area, "button-press-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->sv_area, "button-release-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->hue_area, "button-release-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->alpha_area, "button-release-event", G_CALLBACK(picker_event), picker); if (picker->gradient_box) { g_signal_connect(picker->gradient_sv_area, "draw", G_CALLBACK(picker_draw), picker); g_signal_connect(picker->gradient_hue_area, "draw", G_CALLBACK(picker_draw), picker); g_signal_connect(picker->gradient_alpha_area, "draw", G_CALLBACK(picker_draw), picker); g_signal_connect(picker->gradient_sv_area, "motion-notify-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_hue_area, "motion-notify-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_alpha_area, "motion-notify-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_sv_area, "button-press-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_hue_area, "button-press-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_alpha_area, "button-press-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_sv_area, "button-release-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_hue_area, "button-release-event", G_CALLBACK(picker_event), picker); g_signal_connect(picker->gradient_alpha_area, "button-release-event", G_CALLBACK(picker_event), picker); }
-    g_signal_connect(picker->window, "destroy", G_CALLBACK(picker_destroy), picker); gtk_widget_show_all(picker->window); if (picker->gradient_box) gtk_widget_set_visible(picker->gradient_box, widget_int(picker->target, "widget-gradient", FALSE));
+    g_signal_connect(picker->window, "destroy", G_CALLBACK(picker_destroy), picker); gtk_widget_show_all(picker->window); if (picker->gradient_box) gtk_widget_set_visible(picker->gradient_box, widget->gradient);
+}
+
+static void widget_option_changed(GtkWidget *control, App *app) {
+    GtkWidget *owner = g_object_get_data(G_OBJECT(control), "option-owner"); if (app->widget_settings_updating || !is_live_widget(app, owner)) return;
+    DeskWidget *widget = desk_of(owner); const char *key = g_object_get_data(G_OBJECT(control), "option-key"); char *value = NULL;
+    if (GTK_IS_SPIN_BUTTON(control)) value = g_strdup_printf("%d", gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(control)));
+    else if (GTK_IS_TOGGLE_BUTTON(control)) value = g_strdup(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(control)) ? "1" : "0");
+    else if (GTK_IS_COMBO_BOX(control)) value = g_strdup(gtk_combo_box_get_active_id(GTK_COMBO_BOX(control)));
+    else if (GTK_IS_ENTRY(control)) value = g_strdup(gtk_entry_get_text(GTK_ENTRY(control)));
+    if (value && strcmp(value, desk_widget_get(widget, key))) { desk_widget_set(widget, key, value); wallpaper_widgets_changed(app); }
+    g_free(value);
+}
+
+static gboolean widget_option_focus_out(GtkWidget *entry, GdkEvent *event, App *app) { (void)event; widget_option_changed(entry, app); return FALSE; }
+
+/* Builds the control for one kind-specific option from its description in widgets.c. */
+static void add_widget_option(App *app, const WidgetOption *option) {
+    DeskWidget *widget = desk_of(app->selected_widget); GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6), *control = NULL; const char *value = desk_widget_get(widget, option->key);
+    if (option->type != WIDGET_OPT_BOOL) gtk_box_pack_start(GTK_BOX(row), gtk_label_new(option->label), FALSE, FALSE, 0);
+    if (option->type == WIDGET_OPT_BOOL) { control = gtk_check_button_new_with_label(option->label); gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(control), atoi(value)); g_signal_connect(control, "toggled", G_CALLBACK(widget_option_changed), app); }
+    else if (option->type == WIDGET_OPT_INT) { control = gtk_spin_button_new_with_range(option->min, option->max, 1); gtk_spin_button_set_value(GTK_SPIN_BUTTON(control), desk_widget_int(widget, option->key)); g_signal_connect(control, "value-changed", G_CALLBACK(widget_option_changed), app); }
+    else if (option->type == WIDGET_OPT_CHOICE) {
+        control = gtk_combo_box_text_new(); char **choices = g_strsplit(option->choices, "|", -1);
+        for (guint i = 0; choices[i]; i++) { char **pair = g_strsplit(choices[i], ":", 2); if (pair[0] && pair[1]) gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(control), pair[0], pair[1]); g_strfreev(pair); }
+        g_strfreev(choices); gtk_combo_box_set_active_id(GTK_COMBO_BOX(control), value); g_signal_connect(control, "changed", G_CALLBACK(widget_option_changed), app);
+    } else {
+        control = gtk_entry_new(); gtk_entry_set_text(GTK_ENTRY(control), value); gtk_entry_set_width_chars(GTK_ENTRY(control), !strcmp(option->key, "command") ? 42 : 16); gtk_widget_set_tooltip_text(control, "Press Enter to apply");
+        if (!strcmp(option->key, "player")) gtk_entry_set_placeholder_text(GTK_ENTRY(control), "Any player");
+        g_signal_connect(control, "activate", G_CALLBACK(widget_option_changed), app); g_signal_connect(control, "focus-out-event", G_CALLBACK(widget_option_focus_out), app);
+    }
+    g_object_set_data(G_OBJECT(control), "option-key", (gpointer)option->key); g_object_set_data(G_OBJECT(control), "option-owner", app->selected_widget);
+    gtk_box_pack_start(GTK_BOX(row), control, FALSE, FALSE, 0); gtk_container_add(GTK_CONTAINER(app->widget_settings_options), row);
 }
 
 static void update_widget_inspector(App *app) {
-    GtkWidget *widget = app->selected_widget;
+    DeskWidget *widget = desk_of(app->selected_widget);
     app->widget_settings_updating = TRUE;
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(app->widget_settings_format));
+    GList *children = gtk_container_get_children(GTK_CONTAINER(app->widget_settings_options)); for (GList *l = children; l; l = l->next) gtk_widget_destroy(l->data); g_list_free(children);
     if (!widget) {
         gtk_label_set_text(GTK_LABEL(app->widget_settings_name), "Select a widget");
-        gtk_widget_set_sensitive(app->widget_settings_panel, FALSE);
+        gtk_widget_set_sensitive(app->widget_settings_panel, FALSE); refresh_widget_color_previews(app);
         app->widget_settings_updating = FALSE;
         return;
     }
-    const char *kind = g_object_get_data(G_OBJECT(widget), "widget-kind");
-    const char *format = g_object_get_data(G_OBJECT(widget), "widget-format");
-    gtk_label_set_text(GTK_LABEL(app->widget_settings_name), !g_strcmp0(kind, "time") ? "Time widget" : "Date widget");
-    if (!g_strcmp0(kind, "time")) {
-        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app->widget_settings_format), "24", "24-hour time");
-        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app->widget_settings_format), "12", "12-hour time");
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(app->widget_settings_format), !g_strcmp0(format, "12") ? "12" : "24");
-    } else {
-        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app->widget_settings_format), "long", "Long date");
-        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app->widget_settings_format), "short", "Short date");
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(app->widget_settings_format), !g_strcmp0(format, "short") ? "short" : "long");
-    }
-    gtk_widget_set_sensitive(app->widget_settings_format, TRUE);
-    const char *font = g_object_get_data(G_OBJECT(widget), "widget-font");
-    gtk_button_set_label(GTK_BUTTON(app->widget_settings_font), font ? font : "Sans");
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_size), widget_int(widget, "widget-size", 32)); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_width), widget_int(widget, "widget-width", 0)); gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->widget_settings_bold), widget_int(widget, "widget-bold", TRUE)); gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->widget_settings_italic), widget_int(widget, "widget-italic", FALSE)); gtk_range_set_value(GTK_RANGE(app->widget_settings_spacing), widget_int(widget, "widget-spacing", 0)); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_stretch_x), widget_int(widget, "widget-stretch-x", 100)); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_stretch_y), widget_int(widget, "widget-stretch-y", 100));
+    gtk_label_set_text(GTK_LABEL(app->widget_settings_name), desk_widget_kind_label(widget->kind));
+    gtk_button_set_label(GTK_BUTTON(app->widget_settings_font), widget->font ? widget->font : "Sans");
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_size), widget->size); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_scale), widget->scale); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_width), widget->width); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_radius), widget->radius);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->widget_settings_bold), widget->bold); gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->widget_settings_italic), widget->italic); gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->widget_settings_box), widget->panel);
+    gtk_range_set_value(GTK_RANGE(app->widget_settings_spacing), widget->spacing); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_stretch_x), widget->stretch_x); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_stretch_y), widget->stretch_y);
+    guint count = 0; const WidgetOption *options = desk_widget_options(&count);
+    for (guint i = 0; i < count; i++) if (!strcmp(options[i].kind, widget->kind)) add_widget_option(app, &options[i]);
+    gtk_widget_show_all(app->widget_settings_options);
     refresh_widget_color_previews(app);
     gtk_widget_set_sensitive(app->widget_settings_panel, TRUE);
     app->widget_settings_updating = FALSE;
 }
 
-static void widget_format_changed(GtkComboBox *combo, App *app) {
-    if (app->widget_settings_updating || !app->selected_widget) return;
-    const char *format = gtk_combo_box_get_active_id(combo);
-    if (!format) return;
-    g_object_set_data_full(G_OBJECT(app->selected_widget), "widget-format", g_strdup(format), g_free);
-    update_widget_labels(app);
-    save_wallpaper_widgets(app);
-}
-
 static void widget_style_changed(GtkWidget *control, App *app) {
     if (app->widget_settings_updating || !app->selected_widget) return;
-    GtkWidget *widget = app->selected_widget;
-    if (GTK_IS_RANGE(control)) {
-        const char *key = control == app->widget_settings_size ? "widget-size" : control == app->widget_settings_width ? "widget-width" : control == app->widget_settings_spacing ? "widget-spacing" : control == app->widget_settings_stretch_x ? "widget-stretch-x" : "widget-stretch-y";
-        int maximum = control == app->widget_settings_size ? 160 : control == app->widget_settings_width ? 1600 : control == app->widget_settings_spacing ? 40 : 200; int minimum = control == app->widget_settings_stretch_x || control == app->widget_settings_stretch_y ? 50 : 0; g_object_set_data(G_OBJECT(widget), key, GINT_TO_POINTER(CLAMP((int)round(gtk_range_get_value(GTK_RANGE(control))), minimum, maximum)));
-    } else if (control == app->widget_settings_bold) g_object_set_data(G_OBJECT(widget), "widget-bold", GINT_TO_POINTER(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(control))));
-    else if (control == app->widget_settings_italic) g_object_set_data(G_OBJECT(widget), "widget-italic", GINT_TO_POINTER(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(control))));
-    update_widget_labels(app); save_wallpaper_widgets(app);
+    DeskWidget *widget = desk_of(app->selected_widget);
+    if (GTK_IS_SPIN_BUTTON(control)) {
+        int value = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(control));
+        if (control == app->widget_settings_size) widget->size = CLAMP(value, 8, 160); else if (control == app->widget_settings_width) widget->width = CLAMP(value, 0, 1600); else if (control == app->widget_settings_scale) widget->scale = CLAMP(value, 25, 400);
+        else if (control == app->widget_settings_stretch_x) widget->stretch_x = CLAMP(value, 50, 200); else if (control == app->widget_settings_stretch_y) widget->stretch_y = CLAMP(value, 50, 200); else if (control == app->widget_settings_radius) widget->radius = CLAMP(value, 0, 200);
+    } else if (GTK_IS_RANGE(control)) widget->spacing = CLAMP((int)round(gtk_range_get_value(GTK_RANGE(control))), 0, 40);
+    else if (control == app->widget_settings_bold) widget->bold = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(control));
+    else if (control == app->widget_settings_italic) widget->italic = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(control));
+    else if (control == app->widget_settings_box) widget->panel = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(control));
+    wallpaper_widgets_changed(app);
+}
+
+static void select_wallpaper_widget(App *app, GtkWidget *box) {
+    if (app->selected_widget == box) return;
+    if (app->selected_widget) gtk_style_context_remove_class(gtk_widget_get_style_context(app->selected_widget), "wallpaper-widget-selected");
+    app->selected_widget = box;
+    if (box) gtk_style_context_add_class(gtk_widget_get_style_context(box), "wallpaper-widget-selected");
+    update_widget_inspector(app);
 }
 
 static void delete_selected_widget(GtkButton *button, App *app) {
     (void)button;
-    if (!app->selected_widget) return;
-    GtkWidget *widget = app->selected_widget;
-    app->selected_widget = NULL;
-    gtk_style_context_remove_class(gtk_widget_get_style_context(widget), "wallpaper-widget-selected");
-    g_ptr_array_remove(app->wallpaper_widgets, widget);
-    gtk_widget_destroy(widget);
-    save_wallpaper_widgets(app);
-    update_widget_inspector(app);
+    GtkWidget *box = app->selected_widget; if (!box) return;
+    select_wallpaper_widget(app, NULL);
+    g_ptr_array_remove(app->wallpaper_widgets, box);
+    gtk_widget_destroy(box);
+    wallpaper_widgets_changed(app);
 }
 
 static gboolean wallpaper_widget_press(GtkWidget *widget, GdkEventButton *event, App *app) {
     if (event->button != GDK_BUTTON_PRIMARY) return FALSE;
-    if (app->selected_widget != widget) {
-        if (app->selected_widget) gtk_style_context_remove_class(gtk_widget_get_style_context(app->selected_widget), "wallpaper-widget-selected");
-        app->selected_widget = widget;
-        gtk_style_context_add_class(gtk_widget_get_style_context(widget), "wallpaper-widget-selected");
-        update_widget_inspector(app);
-    }
+    /* Focus first so a half-typed option entry commits to the widget it belongs to. */
+    gtk_widget_grab_focus(widget); select_wallpaper_widget(app, widget);
     g_object_set_data(G_OBJECT(widget), "dragging", GINT_TO_POINTER(TRUE));
     g_object_set_data(G_OBJECT(widget), "drag-x", GINT_TO_POINTER((int)event->x_root));
     g_object_set_data(G_OBJECT(widget), "drag-y", GINT_TO_POINTER((int)event->y_root));
     g_object_set_data(G_OBJECT(widget), "drag-left", GINT_TO_POINTER(gtk_widget_get_margin_start(widget)));
     g_object_set_data(G_OBJECT(widget), "drag-top", GINT_TO_POINTER(gtk_widget_get_margin_top(widget)));
-    gtk_widget_grab_focus(widget); gtk_widget_show(app->widget_grid); gtk_widget_queue_draw(app->widget_grid); return TRUE;
+    gtk_widget_show(app->widget_grid); gtk_widget_queue_draw(app->widget_grid); return TRUE;
 }
 
 static gboolean wallpaper_widget_motion(GtkWidget *widget, GdkEventMotion *event, App *app) {
@@ -388,36 +355,37 @@ static gboolean wallpaper_widget_release(GtkWidget *widget, GdkEventButton *even
     (void)event; g_object_set_data(G_OBJECT(widget), "dragging", GINT_TO_POINTER(FALSE)); gtk_widget_hide(app->widget_grid); return TRUE;
 }
 
-static GtkWidget *create_wallpaper_widget(App *app, const char *kind, const char *format, double x, double y) {
-    GtkWidget *event_box = gtk_event_box_new(); GtkWidget *label = gtk_drawing_area_new();
+static GtkWidget *create_wallpaper_widget(App *app, DeskWidget *widget) {
+    GtkWidget *event_box = gtk_event_box_new(); GtkWidget *label = gtk_drawing_area_new(); gint64 *bucket = g_new(gint64, 1); *bucket = -1;
     gtk_widget_set_can_focus(event_box, TRUE); gtk_widget_add_events(event_box, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK);
-    gtk_style_context_add_class(gtk_widget_get_style_context(event_box), "wallpaper-widget"); gtk_container_add(GTK_CONTAINER(event_box), label); set_widget_style_defaults(event_box, kind);
-    g_object_set_data_full(G_OBJECT(event_box), "widget-kind", g_strdup(kind), g_free); g_object_set_data_full(G_OBJECT(event_box), "widget-format", g_strdup(format ? format : (!g_strcmp0(kind, "time") ? "24" : "long")), g_free); g_object_set_data(G_OBJECT(event_box), "widget-label", label);
+    gtk_style_context_add_class(gtk_widget_get_style_context(event_box), "wallpaper-widget"); gtk_container_add(GTK_CONTAINER(event_box), label);
+    g_object_set_data_full(G_OBJECT(event_box), "desk-widget", widget, (GDestroyNotify)desk_widget_free); g_object_set_data(G_OBJECT(event_box), "widget-app", app); g_object_set_data(G_OBJECT(event_box), "widget-label", label); g_object_set_data_full(G_OBJECT(event_box), "widget-bucket", bucket, g_free);
     g_object_set_data(G_OBJECT(label), "widget-owner", event_box); g_signal_connect(label, "draw", G_CALLBACK(draw_wallpaper_widget), event_box);
     g_signal_connect(event_box, "button-press-event", G_CALLBACK(wallpaper_widget_press), app); g_signal_connect(event_box, "motion-notify-event", G_CALLBACK(wallpaper_widget_motion), app); g_signal_connect(event_box, "button-release-event", G_CALLBACK(wallpaper_widget_release), app); g_signal_connect(event_box, "map", G_CALLBACK(wallpaper_widget_map), app);
-    gtk_widget_set_halign(event_box, GTK_ALIGN_START); gtk_widget_set_valign(event_box, GTK_ALIGN_START); gtk_widget_set_tooltip_text(event_box, "Drag to move"); set_widget_normalized_position(event_box, app, x, y);
-    gtk_overlay_add_overlay(GTK_OVERLAY(app->widget_canvas), event_box); g_ptr_array_add(app->wallpaper_widgets, event_box); update_widget_labels(app); gtk_widget_show_all(event_box); return event_box;
+    char *tooltip = g_strdup_printf("%s · drag to move", desk_widget_kind_label(widget->kind)); gtk_widget_set_halign(event_box, GTK_ALIGN_START); gtk_widget_set_valign(event_box, GTK_ALIGN_START); gtk_widget_set_tooltip_text(event_box, tooltip); g_free(tooltip); set_widget_normalized_position(event_box, app, widget->x, widget->y);
+    gtk_overlay_add_overlay(GTK_OVERLAY(app->widget_canvas), event_box); g_ptr_array_add(app->wallpaper_widgets, event_box); gtk_widget_show_all(event_box); return event_box;
 }
 
 static void add_wallpaper_widget(GtkMenuItem *item, App *app) {
-    const char *kind = g_object_get_data(G_OBJECT(item), "widget-kind"); guint index = app->wallpaper_widgets->len;
-    create_wallpaper_widget(app, kind, NULL, 0.04 + (index % 3) * 0.18, 0.05 + (index / 3) * 0.10); save_wallpaper_widgets(app);
+    const char *kind = g_object_get_data(G_OBJECT(item), "widget-kind"); guint index = app->wallpaper_widgets->len; DeskWidget *widget = desk_widget_new(kind);
+    widget->x = 0.04 + (index % 3) * 0.18; widget->y = 0.05 + (index / 3 % 6) * 0.10;
+    GtkWidget *box = create_wallpaper_widget(app, widget); wallpaper_widgets_changed(app); select_wallpaper_widget(app, box);
 }
 
 static void load_saved_wallpaper_widgets(App *app) {
-    char *path = data_path("widgets.conf"); char *contents = read_file(path); g_free(path); if (!contents) return;
-    char **lines = g_strsplit(contents, "\n", -1);
-    for (guint i = 0; lines[i]; i++) { char kind[16], format[16] = ""; double x, y; int fields = sscanf(lines[i], "%15s %lf %lf %15s", kind, &x, &y, format); if (fields >= 3 && (!strcmp(kind, "time") || !strcmp(kind, "date"))) { GtkWidget *widget = create_wallpaper_widget(app, kind, fields == 4 ? format : NULL, x, y); apply_widget_style_line(widget, lines[i]); } }
-    update_widget_labels(app); g_strfreev(lines); g_free(contents);
+    char *contents = desk_widgets_read(); GPtrArray *widgets = desk_widgets_parse(contents); g_free(contents);
+    g_ptr_array_set_free_func(widgets, NULL); for (guint i = 0; i < widgets->len; i++) create_wallpaper_widget(app, g_ptr_array_index(widgets, i));
+    g_ptr_array_free(widgets, TRUE); sync_widget_feed(app); update_widget_labels(app);
 }
 
 static void widget_page_destroy(GtkWidget *page, App *app) {
     (void)page;
     if (app->widget_clock_id) { g_source_remove(app->widget_clock_id); app->widget_clock_id = 0; }
+    widget_feed_free(app->widget_feed); app->widget_feed = NULL; widget_snapshot_clear(&app->widget_snapshot);
 }
 
 void add_css(void) {
-    GtkCssProvider *widget_css = gtk_css_provider_new(); gtk_css_provider_load_from_data(widget_css, ".wallpaper-widget { border: 0; background: transparent; } .wallpaper-widget-selected { border: 0; box-shadow: 0 0 0 1px #ffd84a; }", -1, NULL); gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(widget_css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1); g_object_unref(widget_css);
+    GtkCssProvider *widget_css = gtk_css_provider_new(); gtk_css_provider_load_from_data(widget_css, ".wallpaper-widget { border: 0; background: transparent; } .wallpaper-widget-selected { border: 0; box-shadow: 0 0 0 1px #ffd84a; } .widget-options flowboxchild, .widget-options flowboxchild:hover { padding: 2px 0; border: 0; background: transparent; } scrolledwindow.widget-options { border: 0; } spinbutton { color: #dce5e8; }", -1, NULL); gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(widget_css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1); g_object_unref(widget_css);
     GtkCssProvider *css = gtk_css_provider_new(); gtk_css_provider_load_from_data(css,
         "* { border-radius: 0; } window, notebook, notebook stack { background: #020304; color: #dce5e8; } notebook header { background: #010203; border-bottom: 1px solid #182126; } notebook tab { padding: 11px 22px; color: #59666d; border: 0; } notebook tab:checked { color: #a9e0ef; border-bottom: 2px solid #a9e0ef; } .brand { font-size: 21px; font-weight: 600; color: #e5f0f2; } .muted, .row-subtitle { color: #596970; } .section { margin-top: 12px; margin-bottom: 5px; font-size: 11px; font-weight: 700; letter-spacing: 1px; color: #8fcbdc; } entry, combobox, button { min-height: 32px; border: 1px solid #202b30; background: #111518; color: #dce5e8; box-shadow: none; } entry:focus, textview:focus { border: 1px solid #a9e0ef; } button:hover { background: #1a2226; border-color: #7899a3; } button.suggested-action { background: #a9e0ef; color: #081013; border-color: #a9e0ef; } button.suggested-action:hover { background: #c6edf5; } .preview, .thumb { border: 1px solid #202b30; } .wallpaper-widget { padding: 0; border: 1px solid #a9e0ef; background: transparent; color: #e5f0f2; } .wallpaper-widget-selected { border-color: #ffd84a; box-shadow: 0 0 0 1px #ffd84a; } .row-title { font-weight: 600; color: #dce8eb; } flowbox { padding: 2px; } flowboxchild { padding: 4px; border: 1px solid #1b2428; background: #0d1113; } flowboxchild:hover { border-color: #334950; } flowboxchild:selected { border-color: #a9e0ef; background: #111b1f; } textview { background: #050607; color: #d1e1e6; border: 1px solid #202b30; } scrolledwindow { border: 1px solid #172024; }", -1, NULL); gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION); GtkCssProvider *compact_css = gtk_css_provider_new(); gtk_css_provider_load_from_data(compact_css, ".selected-control { min-height: 0; padding: 0 4px; font-size: 9px; } .selected-scroll { border: 1px solid #172024; }", -1, NULL); gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(compact_css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION); g_object_unref(compact_css); g_object_unref(css);
 }
@@ -445,24 +413,32 @@ GtkWidget *build_ui(App *app) {
     app->widget_preview = gtk_gl_area_new(); gtk_widget_set_size_request(app->widget_preview, 640, MAX(360, (int)(640.0 / widget_ratio))); gtk_widget_set_hexpand(app->widget_preview, TRUE); gtk_widget_set_vexpand(app->widget_preview, TRUE); gtk_container_add(GTK_CONTAINER(app->widget_canvas), app->widget_preview); g_signal_connect(app->widget_preview, "realize", G_CALLBACK(widget_preview_realize), app); g_signal_connect(app->widget_preview, "unrealize", G_CALLBACK(widget_preview_unrealize), app); g_signal_connect(app->widget_preview, "render", G_CALLBACK(widget_preview_render), app);
     app->widget_grid = gtk_drawing_area_new(); gtk_widget_set_halign(app->widget_grid, GTK_ALIGN_FILL); gtk_widget_set_valign(app->widget_grid, GTK_ALIGN_FILL); gtk_widget_set_hexpand(app->widget_grid, TRUE); gtk_widget_set_vexpand(app->widget_grid, TRUE); gtk_widget_set_sensitive(app->widget_grid, FALSE); gtk_widget_set_no_show_all(app->widget_grid, TRUE); g_signal_connect(app->widget_grid, "draw", G_CALLBACK(draw_widget_grid), app); gtk_overlay_add_overlay(GTK_OVERLAY(app->widget_canvas), app->widget_grid);
     GtkWidget *widget_toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); GtkWidget *add_widget = gtk_menu_button_new(); gtk_button_set_label(GTK_BUTTON(add_widget), "+"); gtk_widget_set_tooltip_text(add_widget, "Add wallpaper widget"); gtk_box_pack_start(GTK_BOX(widget_toolbar), add_widget, FALSE, FALSE, 0); gtk_widget_set_halign(widget_toolbar, GTK_ALIGN_END); gtk_widget_set_valign(widget_toolbar, GTK_ALIGN_START); gtk_widget_set_margin_top(widget_toolbar, 14); gtk_widget_set_margin_end(widget_toolbar, 14); gtk_overlay_add_overlay(GTK_OVERLAY(app->widget_canvas), widget_toolbar);
-    GtkWidget *widget_menu = gtk_menu_new(); GtkWidget *time_item = gtk_menu_item_new_with_label("Time"); GtkWidget *date_item = gtk_menu_item_new_with_label("Date"); gtk_widget_set_size_request(time_item, 120, -1); gtk_widget_set_size_request(date_item, 120, -1); g_object_set_data(G_OBJECT(time_item), "widget-kind", (gpointer)"time"); g_object_set_data(G_OBJECT(date_item), "widget-kind", (gpointer)"date"); gtk_menu_shell_append(GTK_MENU_SHELL(widget_menu), time_item); gtk_menu_shell_append(GTK_MENU_SHELL(widget_menu), date_item); g_signal_connect(time_item, "activate", G_CALLBACK(add_wallpaper_widget), app); g_signal_connect(date_item, "activate", G_CALLBACK(add_wallpaper_widget), app); gtk_widget_show_all(widget_menu); gtk_menu_button_set_popup(GTK_MENU_BUTTON(add_widget), widget_menu);
-    GtkWidget *inspector = gtk_frame_new("Selected widget"); app->widget_settings_panel = inspector; gtk_widget_set_size_request(inspector, -1, 190); gtk_widget_set_hexpand(inspector, TRUE);
+    GtkWidget *widget_menu = gtk_menu_new(); guint kind_count = 0; const WidgetKind *kinds = desk_widget_kinds(&kind_count);
+    for (guint i = 0; i < kind_count; i++) { GtkWidget *item = gtk_menu_item_new_with_label(kinds[i].label); gtk_widget_set_size_request(item, 160, -1); g_object_set_data(G_OBJECT(item), "widget-kind", (gpointer)kinds[i].kind); gtk_menu_shell_append(GTK_MENU_SHELL(widget_menu), item); g_signal_connect(item, "activate", G_CALLBACK(add_wallpaper_widget), app); }
+    gtk_widget_show_all(widget_menu); gtk_menu_button_set_popup(GTK_MENU_BUTTON(add_widget), widget_menu);
+    GtkWidget *inspector = gtk_frame_new("Selected widget"); app->widget_settings_panel = inspector; gtk_widget_set_hexpand(inspector, TRUE);
     GtkWidget *inspector_grid = gtk_grid_new(); gtk_container_set_border_width(GTK_CONTAINER(inspector_grid), 10); gtk_grid_set_row_spacing(GTK_GRID(inspector_grid), 6); gtk_grid_set_column_spacing(GTK_GRID(inspector_grid), 8); gtk_container_add(GTK_CONTAINER(inspector), inspector_grid);
     app->widget_settings_name = gtk_label_new("Select a widget"); gtk_widget_set_halign(app->widget_settings_name, GTK_ALIGN_START); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_name, 0, 0, 1, 1);
-    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Format"), 1, 0, 1, 1); app->widget_settings_format = gtk_combo_box_text_new(); gtk_widget_set_size_request(app->widget_settings_format, 150, -1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_format, 2, 0, 1, 1); g_signal_connect(app->widget_settings_format, "changed", G_CALLBACK(widget_format_changed), app);
-    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Font"), 3, 0, 1, 1); app->widget_settings_font = gtk_button_new_with_label("Sans"); gtk_widget_set_size_request(app->widget_settings_font, 130, -1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_font, 4, 0, 1, 1); g_signal_connect(app->widget_settings_font, "clicked", G_CALLBACK(font_button_clicked), app);
-    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Size"), 5, 0, 1, 1); app->widget_settings_size = gtk_spin_button_new_with_range(8, 160, 1); gtk_widget_set_size_request(app->widget_settings_size, 68, -1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_size, 6, 0, 1, 1); g_signal_connect(app->widget_settings_size, "value-changed", G_CALLBACK(widget_style_changed), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Font"), 1, 0, 1, 1); app->widget_settings_font = gtk_button_new_with_label("Sans"); gtk_widget_set_size_request(app->widget_settings_font, 130, -1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_font, 2, 0, 1, 1); g_signal_connect(app->widget_settings_font, "clicked", G_CALLBACK(font_button_clicked), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Size"), 3, 0, 1, 1); app->widget_settings_size = gtk_spin_button_new_with_range(8, 160, 1); gtk_widget_set_size_request(app->widget_settings_size, 68, -1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_size, 4, 0, 1, 1); g_signal_connect(app->widget_settings_size, "value-changed", G_CALLBACK(widget_style_changed), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Scale %"), 5, 0, 1, 1); app->widget_settings_scale = gtk_spin_button_new_with_range(25, 400, 5); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_scale, 6, 0, 1, 1); g_signal_connect(app->widget_settings_scale, "value-changed", G_CALLBACK(widget_style_changed), app);
     app->widget_settings_bold = gtk_check_button_new_with_label("Bold"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_bold, 7, 0, 1, 1); g_signal_connect(app->widget_settings_bold, "toggled", G_CALLBACK(widget_style_changed), app);
     app->widget_settings_italic = gtk_check_button_new_with_label("Italic"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_italic, 8, 0, 1, 1); g_signal_connect(app->widget_settings_italic, "toggled", G_CALLBACK(widget_style_changed), app);
-    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Text"), 0, 1, 1, 1); app->widget_settings_color = widget_color_button(app, "widget-color"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_color, 1, 1, 2, 1); g_signal_connect(app->widget_settings_color, "clicked", G_CALLBACK(widget_color_button_clicked), app);
-
-    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Spacing"), 0, 2, 1, 1); app->widget_settings_spacing = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 40, 1); gtk_scale_set_draw_value(GTK_SCALE(app->widget_settings_spacing), TRUE); gtk_widget_set_size_request(app->widget_settings_spacing, 120, -1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_spacing, 1, 2, 1, 1); g_signal_connect(app->widget_settings_spacing, "value-changed", G_CALLBACK(widget_style_changed), app); gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Stretch X"), 2, 2, 1, 1); app->widget_settings_stretch_x = gtk_spin_button_new_with_range(50, 200, 1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_stretch_x, 3, 2, 1, 1); g_signal_connect(app->widget_settings_stretch_x, "value-changed", G_CALLBACK(widget_style_changed), app); gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Stretch Y"), 4, 2, 1, 1); app->widget_settings_stretch_y = gtk_spin_button_new_with_range(50, 200, 1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_stretch_y, 5, 2, 1, 1); g_signal_connect(app->widget_settings_stretch_y, "value-changed", G_CALLBACK(widget_style_changed), app);
-    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Width"), 0, 3, 1, 1); app->widget_settings_width = gtk_spin_button_new_with_range(0, 1600, 1); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_width), 0); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_width, 1, 3, 1, 1); g_signal_connect(app->widget_settings_width, "value-changed", G_CALLBACK(widget_style_changed), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Text"), 0, 1, 1, 1); app->widget_settings_color = widget_color_button(app, "text"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_color, 1, 1, 2, 1); g_signal_connect(app->widget_settings_color, "clicked", G_CALLBACK(widget_color_button_clicked), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Accent"), 3, 1, 1, 1); app->widget_settings_accent = widget_color_button(app, "accent"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_accent, 4, 1, 1, 1); g_signal_connect(app->widget_settings_accent, "clicked", G_CALLBACK(widget_color_button_clicked), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Secondary"), 5, 1, 1, 1); app->widget_settings_secondary = widget_color_button(app, "secondary"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_secondary, 6, 1, 1, 1); g_signal_connect(app->widget_settings_secondary, "clicked", G_CALLBACK(widget_color_button_clicked), app);
+    app->widget_settings_box = gtk_check_button_new_with_label("Background"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_box, 7, 1, 1, 1); g_signal_connect(app->widget_settings_box, "toggled", G_CALLBACK(widget_style_changed), app); app->widget_settings_box_color = widget_color_button(app, "panel"); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_box_color, 8, 1, 1, 1); g_signal_connect(app->widget_settings_box_color, "clicked", G_CALLBACK(widget_color_button_clicked), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Spacing"), 0, 2, 1, 1); app->widget_settings_spacing = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 40, 1); gtk_scale_set_draw_value(GTK_SCALE(app->widget_settings_spacing), TRUE); gtk_widget_set_size_request(app->widget_settings_spacing, 120, -1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_spacing, 1, 2, 2, 1); g_signal_connect(app->widget_settings_spacing, "value-changed", G_CALLBACK(widget_style_changed), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Stretch X"), 3, 2, 1, 1); app->widget_settings_stretch_x = gtk_spin_button_new_with_range(50, 200, 1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_stretch_x, 4, 2, 1, 1); g_signal_connect(app->widget_settings_stretch_x, "value-changed", G_CALLBACK(widget_style_changed), app); gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Stretch Y"), 5, 2, 1, 1); app->widget_settings_stretch_y = gtk_spin_button_new_with_range(50, 200, 1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_stretch_y, 6, 2, 1, 1); g_signal_connect(app->widget_settings_stretch_y, "value-changed", G_CALLBACK(widget_style_changed), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Width"), 7, 2, 1, 1); app->widget_settings_width = gtk_spin_button_new_with_range(0, 1600, 1); gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->widget_settings_width), 0); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_width, 8, 2, 1, 1); g_signal_connect(app->widget_settings_width, "value-changed", G_CALLBACK(widget_style_changed), app);
+    gtk_grid_attach(GTK_GRID(inspector_grid), gtk_label_new("Corner radius"), 0, 3, 1, 1); app->widget_settings_radius = gtk_spin_button_new_with_range(0, 200, 1); gtk_grid_attach(GTK_GRID(inspector_grid), app->widget_settings_radius, 1, 3, 1, 1); g_signal_connect(app->widget_settings_radius, "value-changed", G_CALLBACK(widget_style_changed), app);
     GtkWidget *delete_widget = gtk_button_new_with_label("Delete"); gtk_widget_set_halign(delete_widget, GTK_ALIGN_END); gtk_grid_attach(GTK_GRID(inspector_grid), delete_widget, 8, 3, 1, 1); g_signal_connect(delete_widget, "clicked", G_CALLBACK(delete_selected_widget), app);
-    gtk_box_pack_start(GTK_BOX(widgets_page), inspector, FALSE, FALSE, 0); update_widget_inspector(app); load_saved_wallpaper_widgets(app);
-    g_signal_connect(widgets_page, "destroy", G_CALLBACK(widget_page_destroy), app); app->widget_clock_id = g_timeout_add(1000, update_widget_labels, app); gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), widgets_page, gtk_label_new("Widgets"));
+    gtk_grid_attach(GTK_GRID(inspector_grid), section_label("OPTIONS"), 0, 4, 9, 1); app->widget_settings_options = gtk_flow_box_new(); gtk_style_context_add_class(gtk_widget_get_style_context(app->widget_settings_options), "widget-options"); gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(app->widget_settings_options), GTK_SELECTION_NONE); gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(app->widget_settings_options), 6); gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(app->widget_settings_options), 18); gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(app->widget_settings_options), 4); gtk_widget_set_hexpand(app->widget_settings_options, TRUE); gtk_widget_set_valign(app->widget_settings_options, GTK_ALIGN_START); GtkWidget *options_scroll = gtk_scrolled_window_new(NULL, NULL); gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(options_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC); gtk_widget_set_size_request(options_scroll, -1, 128); gtk_style_context_add_class(gtk_widget_get_style_context(options_scroll), "widget-options"); gtk_container_add(GTK_CONTAINER(options_scroll), app->widget_settings_options); gtk_grid_attach(GTK_GRID(inspector_grid), options_scroll, 0, 5, 9, 1);
+    gtk_box_pack_start(GTK_BOX(widgets_page), inspector, FALSE, FALSE, 0); app->widget_feed = widget_feed_new(TRUE); update_widget_inspector(app); load_saved_wallpaper_widgets(app);
+    g_signal_connect(widgets_page, "destroy", G_CALLBACK(widget_page_destroy), app); app->widget_clock_id = g_timeout_add(33, update_widget_labels, app); gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), widgets_page, gtk_label_new("Widgets"));
 
     GtkWidget *toy_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); gtk_container_set_border_width(GTK_CONTAINER(toy_page), 24); GtkWidget *toy_title = brand_header("Shadertoy"); gtk_box_pack_start(GTK_BOX(toy_page), toy_title, FALSE, FALSE, 0); GtkWidget *toy_hint = gtk_label_new("Browse Shadertoy directly. Use the injected import button on a shader page."); gtk_widget_set_halign(toy_hint, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(toy_hint), "muted"); gtk_box_pack_start(GTK_BOX(toy_page), toy_hint, FALSE, FALSE, 3);
+    app->toy_status = gtk_label_new(gtk_label_get_text(GTK_LABEL(app->status))); gtk_widget_set_halign(app->toy_status, GTK_ALIGN_START); gtk_label_set_line_wrap(GTK_LABEL(app->toy_status), TRUE); gtk_label_set_ellipsize(GTK_LABEL(app->toy_status), PANGO_ELLIPSIZE_END); gtk_label_set_lines(GTK_LABEL(app->toy_status), 3); gtk_box_pack_start(GTK_BOX(toy_page), app->toy_status, FALSE, FALSE, 3);
 #ifdef HAVE_WEBKIT
     GtkWidget *browser_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); GtkWidget *back = gtk_button_new_with_label("‹"); GtkWidget *forward = gtk_button_new_with_label("›"); app->browser_url = gtk_entry_new(); gtk_entry_set_text(GTK_ENTRY(app->browser_url), "https://www.shadertoy.com"); GtkWidget *go = gtk_button_new_with_label("Go"); gtk_box_pack_start(GTK_BOX(browser_bar), back, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(browser_bar), forward, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(browser_bar), app->browser_url, TRUE, TRUE, 0); gtk_box_pack_start(GTK_BOX(browser_bar), go, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(toy_page), browser_bar, FALSE, FALSE, 8);
     WebKitUserContentManager *content_manager = webkit_user_content_manager_new(); g_signal_connect(content_manager, "script-message-received::glacier", G_CALLBACK(browser_message), app); webkit_user_content_manager_register_script_message_handler(content_manager, "glacier"); WebKitUserScript *script = webkit_user_script_new(browser_import_script, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, NULL, NULL); webkit_user_content_manager_add_script(content_manager, script); webkit_user_script_unref(script); app->browser = webkit_web_view_new_with_user_content_manager(content_manager); webkit_web_view_load_uri(WEBKIT_WEB_VIEW(app->browser), "https://www.shadertoy.com"); gtk_widget_set_vexpand(app->browser, TRUE); gtk_box_pack_start(GTK_BOX(toy_page), app->browser, TRUE, TRUE, 8); g_signal_connect(back, "clicked", G_CALLBACK(browser_back), app); g_signal_connect(forward, "clicked", G_CALLBACK(browser_forward), app); g_signal_connect(go, "clicked", G_CALLBACK(browser_load), app); g_signal_connect(app->browser_url, "activate", G_CALLBACK(browser_load), app); g_signal_connect(app->browser, "load-changed", G_CALLBACK(browser_load_changed), app);
@@ -473,7 +449,19 @@ GtkWidget *build_ui(App *app) {
 
     GtkWidget *settings_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); gtk_container_set_border_width(GTK_CONTAINER(settings_page), 36); GtkWidget *settings_title = brand_header("Settings"); gtk_box_pack_start(GTK_BOX(settings_page), settings_title, FALSE, FALSE, 0); GtkWidget *settings_hint = gtk_label_new("Connection and wallpaper behavior"); gtk_widget_set_halign(settings_hint, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(settings_hint), "muted"); gtk_box_pack_start(GTK_BOX(settings_page), settings_hint, FALSE, FALSE, 3);
     gtk_box_pack_start(GTK_BOX(settings_page), section_label("OPTIONAL SHADERTOY API KEY"), FALSE, FALSE, 14); app->api_key = gtk_entry_new(); gtk_entry_set_visibility(GTK_ENTRY(app->api_key), FALSE); gtk_entry_set_placeholder_text(GTK_ENTRY(app->api_key), "Paste your Shadertoy app key"); const char *env = g_getenv("SHADERTOY_API_KEY"); if (env) gtk_entry_set_text(GTK_ENTRY(app->api_key), env); gtk_box_pack_start(GTK_BOX(settings_page), app->api_key, FALSE, FALSE, 0); GtkWidget *key_hint = gtk_label_new("The embedded browser imports shaders without this key. The key is only for the legacy REST search."); gtk_widget_set_halign(key_hint, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(key_hint), "muted"); gtk_box_pack_start(GTK_BOX(settings_page), key_hint, FALSE, FALSE, 5);
-    gtk_box_pack_start(GTK_BOX(settings_page), section_label("WALLPAPER FPS"), FALSE, FALSE, 18); app->fps = gtk_combo_box_text_new(); gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app->fps), "24"); gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app->fps), "30"); gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app->fps), "45"); gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app->fps), "60"); gtk_combo_box_set_active(GTK_COMBO_BOX(app->fps), 1); gtk_widget_set_halign(app->fps, GTK_ALIGN_START); gtk_box_pack_start(GTK_BOX(settings_page), app->fps, FALSE, FALSE, 0); GtkWidget *mint_hint = gtk_label_new("X11 mode · wallpaper is shared across all workspaces"); gtk_widget_set_halign(mint_hint, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(mint_hint), "muted"); gtk_box_pack_start(GTK_BOX(settings_page), mint_hint, FALSE, FALSE, 22); gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), settings_page, gtk_label_new("Settings"));
+    gtk_box_pack_start(GTK_BOX(settings_page), section_label("PEAK WALLPAPER FPS"), FALSE, FALSE, 18);
+    GdkMonitor *refresh_monitor = gdk_display_get_primary_monitor(display); if (!refresh_monitor && gdk_display_get_n_monitors(display)) refresh_monitor = gdk_display_get_monitor(display, 0); app->monitor_refresh = refresh_monitor ? (int)round(gdk_monitor_get_refresh_rate(refresh_monitor) / 1000.0) : 0;
+    /* Common limits up to 240, plus the monitor's own refresh rate. */
+    static const int fps_choices[] = { 24, 30, 45, 60, 75, 90, 100, 120, 144, 165, 180, 200, 240 }; GArray *rates = g_array_new(FALSE, FALSE, sizeof(int)); g_array_append_vals(rates, fps_choices, G_N_ELEMENTS(fps_choices)); gboolean refresh_listed = FALSE;
+    for (guint i = 0; i < rates->len; i++) if (g_array_index(rates, int, i) == app->monitor_refresh) refresh_listed = TRUE;
+    if (!refresh_listed && app->monitor_refresh > 0 && app->monitor_refresh <= 240) { guint at = 0; while (at < rates->len && g_array_index(rates, int, at) < app->monitor_refresh) at++; g_array_insert_val(rates, at, app->monitor_refresh); }
+    app->fps = gtk_combo_box_text_new();
+    for (guint i = 0; i < rates->len; i++) { int rate = g_array_index(rates, int, i); char id[16], *label = rate == app->monitor_refresh ? g_strdup_printf("%d FPS · monitor refresh", rate) : g_strdup_printf("%d FPS", rate); g_snprintf(id, sizeof(id), "%d", rate); gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app->fps), id, label); g_free(label); }
+    g_array_free(rates, TRUE); gtk_widget_set_halign(app->fps, GTK_ALIGN_START); gtk_box_pack_start(GTK_BOX(settings_page), app->fps, FALSE, FALSE, 0);
+    char *vsync_label = app->monitor_refresh > 0 ? g_strdup_printf("V-sync · show frames in step with the monitor (no tearing; caps the wallpaper at %d FPS)", app->monitor_refresh) : g_strdup("V-sync · show frames in step with the monitor (no tearing; caps the wallpaper at its refresh rate)");
+    app->vsync = gtk_check_button_new_with_label(vsync_label); g_free(vsync_label); gtk_widget_set_halign(app->vsync, GTK_ALIGN_START); gtk_widget_set_margin_top(app->vsync, 10); gtk_box_pack_start(GTK_BOX(settings_page), app->vsync, FALSE, FALSE, 0);
+    app->settings_status = gtk_label_new("Changes apply to the running wallpaper right away."); gtk_widget_set_halign(app->settings_status, GTK_ALIGN_START); gtk_label_set_line_wrap(GTK_LABEL(app->settings_status), TRUE); gtk_style_context_add_class(gtk_widget_get_style_context(app->settings_status), "muted"); gtk_box_pack_start(GTK_BOX(settings_page), app->settings_status, FALSE, FALSE, 8);
+    load_wallpaper_settings(app); g_signal_connect(app->fps, "changed", G_CALLBACK(wallpaper_settings_changed), app); g_signal_connect(app->vsync, "toggled", G_CALLBACK(wallpaper_settings_changed), app); GtkWidget *mint_hint = gtk_label_new("X11 mode · wallpaper is shared across all workspaces"); gtk_widget_set_halign(mint_hint, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(mint_hint), "muted"); gtk_box_pack_start(GTK_BOX(settings_page), mint_hint, FALSE, FALSE, 22); gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), settings_page, gtk_label_new("Settings"));
     gtk_box_set_spacing(GTK_BOX(selected_strip), 0); gtk_box_set_child_packing(GTK_BOX(selected_strip), app->preview, FALSE, FALSE, 0, GTK_PACK_START); gtk_box_set_child_packing(GTK_BOX(selected_strip), controls, FALSE, FALSE, 0, GTK_PACK_START); gtk_box_set_child_packing(GTK_BOX(selected_strip), constants_panel, TRUE, TRUE, 0, GTK_PACK_START); GtkWidget *section_widgets[] = { app->preview, controls, constants_panel }; for (guint i = 0; i < G_N_ELEMENTS(section_widgets); i++) { gtk_widget_set_margin_start(section_widgets[i], 0); gtk_widget_set_margin_end(section_widgets[i], 0); }
     GtkCssProvider *selected_css = gtk_css_provider_new(); gtk_css_provider_load_from_data(selected_css, ".selected-control { font-size: 13px; padding-left: 2px; padding-right: 2px; }", -1, NULL); gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(selected_css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1); g_object_unref(selected_css);
     return root;
