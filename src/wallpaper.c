@@ -48,7 +48,7 @@ static gboolean pixmap_exists(Display *display, Pixmap pixmap, XID own) {
 static gboolean attach_shm(Display *display, gpointer data) { return XShmAttach(display, data) != 0; }
 
 typedef struct { DeskWidget *widget; GLuint texture; int width, height; gint64 bucket; } WallpaperItem;
-typedef struct { GPtrArray *widgets; GArray *items; char *config_text; gint64 last_poll; GLuint program, vao; WidgetFeed *feed; } WallpaperWidgets;
+typedef struct { GPtrArray *widgets; GArray *items; char *config_text; gint64 last_poll; GLuint program, vao; GLint screen_uniform, image_uniform, rect_uniform; WidgetFeed *feed; } WallpaperWidgets;
 
 static void wallpaper_widgets_clear(WallpaperWidgets *widgets) {
     for (guint i = 0; widgets->items && i < widgets->items->len; i++) { WallpaperItem *item = &g_array_index(widgets->items, WallpaperItem, i); if (item->texture) glDeleteTextures(1, &item->texture); }
@@ -101,17 +101,13 @@ static void wallpaper_widgets_render(WallpaperWidgets *widgets, int width, int h
     }
     if (have_data) widget_snapshot_clear(&data);
     /* Cairo gives premultiplied alpha. */
-    glUseProgram(widgets->program); glUniform2f(glGetUniformLocation(widgets->program, "screen"), (float)width, (float)height); glUniform1i(glGetUniformLocation(widgets->program, "image"), 0); glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); glBindVertexArray(widgets->vao);
-    for (guint i = 0; i < widgets->items->len; i++) { WallpaperItem *item = &g_array_index(widgets->items, WallpaperItem, i); if (!item->texture) continue; float x = MIN(item->widget->x * width, MAX(0, width - item->width)), y = MIN(item->widget->y * height, MAX(0, height - item->height)); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, item->texture); glUniform4f(glGetUniformLocation(widgets->program, "rect"), x, y, (float)item->width, (float)item->height); glDrawArrays(GL_TRIANGLES, 0, 6); }
+    glUseProgram(widgets->program); glUniform2f(widgets->screen_uniform, (float)width, (float)height); glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); glBindVertexArray(widgets->vao);
+    for (guint i = 0; i < widgets->items->len; i++) { WallpaperItem *item = &g_array_index(widgets->items, WallpaperItem, i); if (!item->texture) continue; double x = item->widget->x, y = item->widget->y; desk_widget_clamp_position(width, height, item->width, item->height, &x, &y); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, item->texture); glUniform4f(widgets->rect_uniform, (float)(x * width), (float)(y * height), (float)item->width, (float)item->height); glDrawArrays(GL_TRIANGLES, 0, 6); }
     glDisable(GL_BLEND);
 }
 
-static void set_audio_uniforms(GLuint program, const BeatClock *clock, const BeatState *state) {
-    GLint loc;
-    loc = glGetUniformLocation(program, "iBeat"); if (loc >= 0) glUniform1f(loc, (float)clock->beat);
-    loc = glGetUniformLocation(program, "iBPM"); if (loc >= 0) glUniform1f(loc, (float)clock->bpm);
-    loc = glGetUniformLocation(program, "iAudioLevel"); if (loc >= 0) glUniform1f(loc, (float)state->level);
-    loc = glGetUniformLocation(program, "iAudioBass"); if (loc >= 0) glUniform1f(loc, (float)state->bass);
+static void set_audio_uniforms(ShaderUniforms *uniforms, const BeatClock *clock, const BeatState *state) {
+    shader_set_audio_uniforms(uniforms, clock, state);
 }
 
 typedef void (*SwapIntervalExt)(Display *, GLXDrawable, int);
@@ -129,6 +125,75 @@ static Pixmap root_pixmap_property(Display *display, Window root, Atom property)
     if (XGetWindowProperty(display, root, property, 0, 1, False, AnyPropertyType, &actual_type, &format, &count, &remaining, &data) == Success && data && format == 32 && count) result = (Pixmap)((unsigned long *)data)[0];
     if (data) XFree(data);
     return result;
+}
+
+typedef struct { Display *display; Drawable drawable; unsigned width, height; XImage *image; } RootImageRequest;
+static gboolean get_root_image(Display *display, gpointer data) {
+    RootImageRequest *request = data; request->image = XGetImage(display, request->drawable, 0, 0, request->width, request->height, AllPlanes, ZPixmap); return request->image != NULL;
+}
+
+typedef struct { Drawable drawable; int x, y; unsigned width, height, border, depth; } DrawableGeometry;
+static gboolean get_drawable_geometry(Display *display, gpointer data) {
+    DrawableGeometry *geometry = data;
+    Window root;
+    return XGetGeometry(display, geometry->drawable, &root, &geometry->x, &geometry->y,
+                        &geometry->width, &geometry->height, &geometry->border, &geometry->depth) != 0;
+}
+
+static unsigned char root_component(unsigned long pixel, unsigned long mask) {
+    if (!mask) return 0;
+    unsigned shift = 0; while (!(mask & 1u)) { mask >>= 1; shift++; }
+    unsigned long max = mask; unsigned long value = (pixel >> shift) & max; return (unsigned char)((value * 255u + max / 2u) / max);
+}
+
+/* Captures the desktop pixmap once. Chroma mode composites against this image
+   directly, so it works even when the window manager ignores per-pixel alpha. */
+static GLuint root_background_texture(Display *display, Window root, Pixmap saved_pixmap, int width, int height, int *texture_width, int *texture_height) {
+    Atom xroot = XInternAtom(display, "_XROOTPMAP_ID", False), esetroot = XInternAtom(display, "ESETROOT_PMAP_ID", False);
+    Pixmap candidates[3] = { saved_pixmap, root_pixmap_property(display, root, xroot), root_pixmap_property(display, root, esetroot) };
+    for (int candidate = 0; candidate <= 3; candidate++) {
+        Drawable drawable = candidate < 3 && candidates[candidate] ? candidates[candidate] : root;
+        gboolean duplicate = FALSE;
+        for (int previous = 0; previous < candidate && previous < 3; previous++) if (candidates[previous] && drawable == candidates[previous]) duplicate = TRUE;
+        /* Do not pre-reject the property. Resource ids can be close to this
+           client's ids; the guarded X request below is the authoritative test. */
+        /* A broken desktop property can contain the root window id itself.
+           Still try the root drawable as the final, valid fallback. */
+        if (drawable != root && duplicate) continue;
+        int capture_width = width, capture_height = height;
+        if (drawable != root) {
+            DrawableGeometry geometry = { drawable, 0, 0, 0, 0, 0, 0 };
+            if (!x11_try(display, get_drawable_geometry, &geometry) || !geometry.width || !geometry.height) continue;
+            capture_width = (int)geometry.width; capture_height = (int)geometry.height;
+        }
+        RootImageRequest request = { display, drawable, (unsigned)capture_width, (unsigned)capture_height, NULL };
+        if (!x11_try(display, get_root_image, &request) || !request.image) continue;
+        XImage *image = request.image; gsize size = (gsize)capture_width * (gsize)capture_height * 4; guchar *pixels = g_malloc(size);
+        for (int y = 0; y < capture_height; y++) for (int x = 0; x < capture_width; x++) { unsigned long pixel = XGetPixel(image, x, y); gsize offset = ((gsize)y * capture_width + x) * 4; pixels[offset + 0] = root_component(pixel, image->red_mask); pixels[offset + 1] = root_component(pixel, image->green_mask); pixels[offset + 2] = root_component(pixel, image->blue_mask); pixels[offset + 3] = 255; }
+        XDestroyImage(image); GLuint texture = 0; glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, capture_width, capture_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels); glBindTexture(GL_TEXTURE_2D, 0); g_free(pixels); if (texture_width) *texture_width = capture_width; if (texture_height) *texture_height = capture_height; return texture;
+    }
+    return 0;
+}
+
+static GLuint image_background_texture(const char *path, int *texture_width, int *texture_height) {
+    if (!path || !path[0]) return 0;
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(path, NULL);
+    if (!pixbuf) return 0;
+    int width = gdk_pixbuf_get_width(pixbuf), height = gdk_pixbuf_get_height(pixbuf), channels = gdk_pixbuf_get_n_channels(pixbuf), rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    GLenum format = channels == 4 ? GL_RGBA : GL_RGB;
+    GLuint texture = 0; glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, rowstride / channels); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, format, GL_UNSIGNED_BYTE, gdk_pixbuf_get_pixels(pixbuf)); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0); glBindTexture(GL_TEXTURE_2D, 0); g_object_unref(pixbuf); if (texture_width) *texture_width = width; if (texture_height) *texture_height = height; return texture;
+}
+
+static GLuint cinnamon_background_texture(int *texture_width, int *texture_height) {
+    GSettingsSchemaSource *source = g_settings_schema_source_get_default(); GSettingsSchema *schema = source ? g_settings_schema_source_lookup(source, "org.cinnamon.desktop.background", TRUE) : NULL;
+    if (!schema) return 0;
+    GSettings *settings = g_settings_new_full(schema, NULL, NULL); char *uri = NULL;
+    if (g_settings_schema_has_key(schema, "picture-uri")) uri = g_settings_get_string(settings, "picture-uri");
+    if ((!uri || !uri[0]) && g_settings_schema_has_key(schema, "picture-filename")) { g_free(uri); uri = g_settings_get_string(settings, "picture-filename"); }
+    char *path = NULL;
+    if (uri && g_str_has_prefix(uri, "file:")) { GFile *file = g_file_new_for_uri(uri); path = g_file_get_path(file); g_object_unref(file); }
+    else if (uri) path = g_strdup(uri);
+    GLuint texture = image_background_texture(path, texture_width, texture_height); g_free(path); g_free(uri); g_object_unref(settings); return texture;
 }
 
 static gboolean root_mirror_begin(RootMirror *mirror, Display *display, Window root, int width, int height) {
@@ -189,34 +254,44 @@ static void root_mirror_end(RootMirror *mirror) {
     XFlush(display);
 }
 
-int wallpaper_main(const char *path, int fps, gboolean vsync) {
+int wallpaper_main(const char *path, int fps, gboolean vsync, int speed_percent, gboolean chroma_enabled, const float key[3], float smoothing) {
     char *source = read_file(path); if (!source) { fprintf(stderr, "glacier-mint: cannot read %s\n", path); return 1; }
     curl_global_init(CURL_GLOBAL_DEFAULT);
     Display *display = XOpenDisplay(NULL); if (!display) { fprintf(stderr, "glacier-mint: DISPLAY is unavailable\n"); g_free(source); return 1; }
     int screen = DefaultScreen(display); Window root = RootWindow(display, screen); int width = DisplayWidth(display, screen), height = DisplayHeight(display, screen);
-    int attrs[] = { GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, None }; XVisualInfo *visual = glXChooseVisual(display, screen, attrs);
+    int attrs[] = { GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, GLX_ALPHA_SIZE, 8, None }; XVisualInfo *visual = glXChooseVisual(display, screen, attrs); gboolean alpha_visual = FALSE;
+    if (!visual) { int fallback_attrs[] = { GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, None }; visual = glXChooseVisual(display, screen, fallback_attrs); }
     if (!visual) { fprintf(stderr, "glacier-mint: no GLX visual\n"); XCloseDisplay(display); g_free(source); return 1; }
-    Colormap cmap = XCreateColormap(display, root, visual->visual, AllocNone); XSetWindowAttributes swa = {0}; swa.colormap = cmap; swa.border_pixel = 0; swa.background_pixel = 0;
-    Window window = XCreateWindow(display, root, 0, 0, width, height, 0, visual->depth, InputOutput, visual->visual, CWColormap | CWBorderPixel | CWBackPixel, &swa);
+    int alpha_bits = 0; glXGetConfig(display, visual, GLX_ALPHA_SIZE, &alpha_bits); alpha_visual = alpha_bits >= 8;
+    Colormap cmap = XCreateColormap(display, root, visual->visual, AllocNone); XSetWindowAttributes swa = {0}; swa.colormap = cmap; swa.border_pixel = 0; swa.background_pixmap = None;
+    /* Keep an ARGB window available as a fallback. The captured desktop image
+       is composited directly when available, which also works on WMs that do
+       not honor per-pixel alpha for desktop windows. */
+    Window window = XCreateWindow(display, root, 0, 0, width, height, 0, visual->depth, InputOutput, visual->visual, CWColormap | CWBorderPixel | CWBackPixmap, &swa);
     Atom desktop = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DESKTOP", False), type = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False); x11_property(display, window, type, XA_ATOM, (unsigned long *)&desktop, 1);
     Atom below = XInternAtom(display, "_NET_WM_STATE_BELOW", False), sticky = XInternAtom(display, "_NET_WM_STATE_STICKY", False), skip_taskbar = XInternAtom(display, "_NET_WM_STATE_SKIP_TASKBAR", False), skip_pager = XInternAtom(display, "_NET_WM_STATE_SKIP_PAGER", False), state = XInternAtom(display, "_NET_WM_STATE", False); unsigned long states[] = {(unsigned long)below, (unsigned long)sticky, (unsigned long)skip_taskbar, (unsigned long)skip_pager}; x11_property(display, window, state, XA_ATOM, states, 4);
     Atom desktop_number = XInternAtom(display, "_NET_WM_DESKTOP", False); unsigned long all_workspaces = 0xFFFFFFFFUL; x11_property(display, window, desktop_number, XA_CARDINAL, &all_workspaces, 1);
-    XStoreName(display, window, "Glacier Mint wallpaper"); XMapWindow(display, window); XLowerWindow(display, window); XFlush(display);
+    Pixmap saved_background = root_pixmap_property(display, root, XInternAtom(display, "_XROOTPMAP_ID", False)); if (!saved_background) saved_background = root_pixmap_property(display, root, XInternAtom(display, "ESETROOT_PMAP_ID", False)); XStoreName(display, window, "Glacier Mint wallpaper");
     GLXContext context = glXCreateContext(display, visual, NULL, True); XFree(visual); if (!context || !glXMakeCurrent(display, window, context)) { fprintf(stderr, "glacier-mint: could not create GL context\n"); XDestroyWindow(display, window); XCloseDisplay(display); g_free(source); return 1; }
     set_vsync(display, screen, window, vsync);
+    int background_width = 0, background_height = 0; GLuint background_texture = chroma_enabled ? root_background_texture(display, root, saved_background, width, height, &background_width, &background_height) : 0;
+    if (chroma_enabled && !background_texture) background_texture = cinnamon_background_texture(&background_width, &background_height);
+    if (chroma_enabled && !background_texture) fprintf(stderr, "glacier-mint: could not capture the desktop background for chroma key%s\n", alpha_visual ? "" : " (no ARGB visual either)");
+    XMapWindow(display, window); XLowerWindow(display, window); XFlush(display);
     /* Music-reactive shaders get a beat clock that follows whatever is playing; others keep iBeat at 60 BPM. */
     BeatTracker *beats = shader_uses_audio(source) ? beat_tracker_new() : NULL; BeatClock clock = { 0.0, 60.0 }; BeatState beat_state = { FALSE, 60.0, 0.0, 0.0, 0.0 };
-    char *error = NULL; GLuint program = make_program_for_shader(source, path, &error); g_free(source); if (!program) { fprintf(stderr, "glacier-mint: shader error: %s\n", error ? error : "unknown"); g_free(error); beat_tracker_free(beats); glXDestroyContext(display, context); XDestroyWindow(display, window); XCloseDisplay(display); return 1; }
-    GLuint channels[4]; int channel_widths[4], channel_heights[4], channel_types[4]; load_shader_channels(path, channels, channel_widths, channel_heights, channel_types);
-    GLuint vao; glGenVertexArrays(1, &vao); glBindVertexArray(vao); WallpaperWidgets widgets = {0}; widgets.items = g_array_new(FALSE, TRUE, sizeof(WallpaperItem)); widgets.feed = widget_feed_new(FALSE); widgets.program = wallpaper_widget_program(); glGenVertexArrays(1, &widgets.vao); glBindVertexArray(widgets.vao); wallpaper_widgets_poll(&widgets); RootMirror mirror; gboolean mirror_ready = root_mirror_begin(&mirror, display, root, width, height); signal(SIGTERM, on_signal); signal(SIGINT, on_signal); gint64 started = g_get_monotonic_time(); int frame = 0; double period = 1.0 / MAX(fps, 1); gint64 next = started;
+    char *error = NULL; GLuint program = make_program_for_shader(source, path, &error); g_free(source); if (!program) { fprintf(stderr, "glacier-mint: shader error: %s\n", error ? error : "unknown"); g_free(error); if (background_texture) glDeleteTextures(1, &background_texture); beat_tracker_free(beats); glXDestroyContext(display, context); XDestroyWindow(display, window); XCloseDisplay(display); return 1; }
+    GLuint channels[4]; int channel_widths[4], channel_heights[4], channel_types[4]; load_shader_channels(path, channels, channel_widths, channel_heights, channel_types); ShaderUniforms uniforms; shader_uniforms_init(&uniforms, program);
+    gboolean use_background_texture = chroma_enabled && background_texture;
+    GLuint vao; glGenVertexArrays(1, &vao); glBindVertexArray(vao); WallpaperWidgets widgets = {0}; widgets.items = g_array_new(FALSE, TRUE, sizeof(WallpaperItem)); widgets.feed = widget_feed_new(FALSE); widgets.program = wallpaper_widget_program(); if (widgets.program) { widgets.screen_uniform = glGetUniformLocation(widgets.program, "screen"); widgets.image_uniform = glGetUniformLocation(widgets.program, "image"); widgets.rect_uniform = glGetUniformLocation(widgets.program, "rect"); glUseProgram(widgets.program); glUniform1i(widgets.image_uniform, 0); } glGenVertexArrays(1, &widgets.vao); glBindVertexArray(widgets.vao); wallpaper_widgets_poll(&widgets); RootMirror mirror; gboolean mirror_ready = !chroma_enabled && root_mirror_begin(&mirror, display, root, width, height); signal(SIGTERM, on_signal); signal(SIGINT, on_signal); gint64 started = g_get_monotonic_time(); int frame = 0; double period = 1.0 / MAX(fps, 1); gint64 next = started;
     gint64 last = started, mirrored = 0, counted_at = started; int counted = 0; gint64 mirror_spent = 0; gboolean report_fps = g_getenv("GLACIER_MINT_DEBUG_FPS") != NULL;
-    while (wallpaper_running) { gint64 now = g_get_monotonic_time(); float elapsed = (float)(now - started) / 1000000.0f; wallpaper_widgets_poll(&widgets); glViewport(0, 0, width, height); glUseProgram(program); set_uniforms(program, width, height, elapsed, frame++);
-        if (beats) { beat_tracker_state(beats, &beat_state); beat_clock_update(&clock, (now - last) / 1e6, now / 1e6, &beat_state); set_audio_uniforms(program, &clock, &beat_state); } last = now;
-        bind_shader_channels(program, channels, channel_widths, channel_heights, channel_types); glDrawArrays(GL_TRIANGLES, 0, 3); wallpaper_widgets_render(&widgets, width, height); if (mirror_ready && now - mirrored >= 200000) { gint64 before = g_get_monotonic_time(); root_mirror_update(&mirror); mirrored = now; mirror_spent += g_get_monotonic_time() - before; } glXSwapBuffers(display, window);
+    while (wallpaper_running) { gint64 now = g_get_monotonic_time(); float elapsed = (float)(now - started) / 1000000.0f * CLAMP(speed_percent, 0, 200) / 100.0f; gboolean chroma_active = chroma_enabled && (alpha_visual || background_texture); wallpaper_widgets_poll(&widgets); glViewport(0, 0, width, height); glClearColor(0.0f, 0.0f, 0.0f, 0.0f); glClear(GL_COLOR_BUFFER_BIT); glUseProgram(program); shader_set_uniforms(&uniforms, width, height, elapsed, frame++); shader_set_effects(&uniforms, chroma_active, key, smoothing); shader_set_preview_background(&uniforms, FALSE); shader_set_background(&uniforms, background_texture, background_width, background_height, use_background_texture);
+        if (beats) { beat_tracker_state(beats, &beat_state); beat_clock_update(&clock, (now - last) / 1e6, now / 1e6, &beat_state); set_audio_uniforms(&uniforms, &clock, &beat_state); } last = now;
+        bind_shader_channels(&uniforms, channels, channel_widths, channel_heights, channel_types); glDrawArrays(GL_TRIANGLES, 0, 3); wallpaper_widgets_render(&widgets, width, height); if (mirror_ready && now - mirrored >= 200000) { gint64 before = g_get_monotonic_time(); root_mirror_update(&mirror); mirrored = now; mirror_spent += g_get_monotonic_time() - before; } glXSwapBuffers(display, window);
         if (report_fps && ++counted && now - counted_at >= G_USEC_PER_SEC) { fprintf(stderr, "glacier-mint: %.1f fps, %.0f ms/s copying frames to the desktop background\n", counted * 1e6 / (now - counted_at), mirror_spent / 1000.0); counted = 0; counted_at = now; mirror_spent = 0; }
         /* Keep the average at the limit: a late frame is made up, and only a long stall resets the schedule. */
         gint64 frame_us = (gint64)(period * 1000000.0); next += frame_us; gint64 wait = next - g_get_monotonic_time(); if (wait > 0) g_usleep((gulong)wait); else if (wait < -frame_us) next = g_get_monotonic_time(); }
     beat_tracker_free(beats);
     if (mirror_ready) root_mirror_end(&mirror);
-    wallpaper_widgets_clear(&widgets); widget_feed_free(widgets.feed); g_free(widgets.config_text); if (widgets.program) glDeleteProgram(widgets.program); if (widgets.vao) glDeleteVertexArrays(1, &widgets.vao); g_array_free(widgets.items, TRUE); glDeleteProgram(program); free_shader_channels(channels); glXMakeCurrent(display, None, NULL); glXDestroyContext(display, context); XDestroyWindow(display, window); XCloseDisplay(display); return 0;
+    wallpaper_widgets_clear(&widgets); widget_feed_free(widgets.feed); g_free(widgets.config_text); if (widgets.program) glDeleteProgram(widgets.program); if (widgets.vao) glDeleteVertexArrays(1, &widgets.vao); g_array_free(widgets.items, TRUE); if (background_texture) glDeleteTextures(1, &background_texture); glDeleteProgram(program); free_shader_channels(channels); glXMakeCurrent(display, None, NULL); glXDestroyContext(display, context); XDestroyWindow(display, window); XCloseDisplay(display); return 0;
 }

@@ -51,12 +51,27 @@ typedef struct {
     float history[FEED_METRICS][FEED_HISTORY]; int history_count;
     float bands[FEED_BANDS];
     char *title, *artist, *album, *player; gint64 length_us, position_us; cairo_surface_t *art;
-    GHashTable *outputs;
 } WidgetSnapshot;
+
+/* Cached locations and values for one Shadertoy program. */
+typedef struct {
+    GLuint program;
+    GLint resolution, time, time_delta, frame_rate, frame;
+    GLint beat, bpm, audio_level, audio_bass, sample_rate, mouse, chroma_key, chroma_smooth, chroma_preview;
+    GLint background_sampler, background_resolution, background_enabled;
+    GLint channel[4], channel_resolution[4];
+    int channel_widths[4], channel_heights[4];
+    float resolution_value[3], time_value, beat_value, bpm_value;
+    int frame_value;
+    float audio_level_value, audio_bass_value, chroma_key_value[4], chroma_smooth_value;
+    gboolean use_dsa, values_valid, channels_valid, audio_valid, chroma_preview_valid, chroma_preview_value, background_valid, background_value;
+    GLuint background_texture;
+    int background_width, background_height;
+} ShaderUniforms;
 
 typedef struct {
     GtkWidget *window, *notebook, *preview, *widget_canvas, *widget_preview, *widget_grid, *widget_settings_panel, *widget_settings_name, *widget_settings_font, *widget_settings_size, *widget_settings_width, *widget_settings_bold, *widget_settings_italic, *widget_settings_gradient, *widget_settings_color, *widget_settings_gradient_color, *widget_settings_box, *widget_settings_box_color, *widget_settings_border, *widget_settings_radius, *widget_settings_spacing, *widget_settings_stretch_x, *widget_settings_stretch_y, *results, *local_list, *status;
-    GtkWidget *search, *api_key, *fps, *scale, *code_view, *browser, *browser_url, *constants_box, *toy_status;
+    GtkWidget *search, *api_key, *fps, *scale, *speed, *chroma_enable, *chroma_color, *chroma_smoothing, *code_view, *browser, *browser_url, *constants_box, *toy_status;
     GtkWidget *widget_settings_scale, *widget_settings_accent, *widget_settings_secondary, *widget_settings_options, *vsync, *settings_status;
     int monitor_refresh;
     WidgetFeed *widget_feed;
@@ -69,7 +84,9 @@ typedef struct {
     GLuint channel_textures[4];
     int channel_widths[4], channel_heights[4], channel_types[4];
     GLuint program, vao;
+    ShaderUniforms uniforms;
     GLuint widget_program, widget_vao, widget_channel_textures[4];
+    ShaderUniforms widget_uniforms;
     int widget_channel_widths[4], widget_channel_heights[4], widget_channel_types[4];
     gint64 started;
     gboolean preview_ready, widget_preview_ready, widget_settings_updating;
@@ -81,14 +98,19 @@ typedef struct { App *app; char *query; char *key; } SearchJob;
 typedef struct { App *app; GPtrArray *items; char *error; } SearchDone;
 typedef struct { App *app; char *id; char *key; } LoadJob;
 typedef struct { App *app; char *id; char *code; char *title; char *channels_json; char *error; } LoadDone;
-typedef struct { char *source, *path; GLuint program, vao, channel_textures[4]; int channel_widths[4], channel_heights[4], channel_types[4]; gint64 started; } ShaderThumb;
+typedef struct { char *source, *path; GLuint program, vao; ShaderUniforms uniforms; GLuint channel_textures[4]; int channel_widths[4], channel_heights[4], channel_types[4]; gint64 started; } ShaderThumb;
 
 void set_status(App *app, const char *text);
 char *read_file(const char *path);
 
 GLuint make_program(const char *user_source, char **error);
 GLuint make_program_for_shader(const char *user_source, const char *shader_path, char **error);
-void set_uniforms(GLuint program, float width, float height, float time_s, int frame);
+void shader_uniforms_init(ShaderUniforms *uniforms, GLuint program);
+void shader_set_uniforms(ShaderUniforms *uniforms, float width, float height, float time_s, int frame);
+void shader_set_audio_uniforms(ShaderUniforms *uniforms, const BeatClock *clock, const BeatState *state);
+void shader_set_effects(ShaderUniforms *uniforms, gboolean chroma_enabled, const float key[3], float smoothing);
+void shader_set_preview_background(ShaderUniforms *uniforms, gboolean enabled);
+void shader_set_background(ShaderUniforms *uniforms, GLuint texture, int width, int height, gboolean enabled);
 gboolean load_preview(App *app, const char *source, const char *title, const char *id);
 gboolean update_shader_source(App *app, const char *source);
 void apply_constants_clicked(GtkButton *button, App *app);
@@ -96,7 +118,7 @@ void reset_constants_clicked(GtkButton *button, App *app);
 GtkWidget *shader_row(const char *title, const char *subtitle, const char *source, const char *shader_path);
 void free_shader_channels(GLuint textures[4]);
 gboolean load_shader_channels(const char *shader_path, GLuint textures[4], int widths[4], int heights[4], int types[4]);
-void bind_shader_channels(GLuint program, GLuint textures[4], const int widths[4], const int heights[4], const int types[4]);
+void bind_shader_channels(ShaderUniforms *uniforms, GLuint textures[4], const int widths[4], const int heights[4], const int types[4]);
 void preview_realize(GtkGLArea *area, App *app);
 gboolean preview_render(GtkGLArea *area, GdkGLContext *context, App *app);
 void widget_preview_realize(GtkGLArea *area, App *app);
@@ -140,6 +162,8 @@ void browser_external_clicked(GtkButton *button, App *app);
 const WidgetKind *desk_widget_kinds(guint *count);
 const char *desk_widget_kind_label(const char *kind);
 const WidgetOption *desk_widget_options(guint *count);
+gboolean desk_widget_kind_known(const char *kind);
+const WidgetOption *desk_widget_option(const char *kind, const char *key);
 DeskWidget *desk_widget_new(const char *kind);
 void desk_widget_free(DeskWidget *widget);
 const char *desk_widget_get(const DeskWidget *widget, const char *key);
@@ -148,6 +172,7 @@ void desk_widget_set(DeskWidget *widget, const char *key, const char *value);
 float *desk_widget_color(DeskWidget *widget, const char *key);
 int desk_widget_refresh_ms(const DeskWidget *widget);
 void desk_widget_measure(DeskWidget *widget, const WidgetSnapshot *data, int *width, int *height);
+void desk_widget_clamp_position(int screen_width, int screen_height, int widget_width, int widget_height, double *x, double *y);
 void desk_widget_draw(cairo_t *cr, DeskWidget *widget, const WidgetSnapshot *data);
 char *desk_widgets_read(void);
 GPtrArray *desk_widgets_parse(const char *contents);
@@ -167,6 +192,6 @@ void beat_clock_update(BeatClock *clock, double dt, double now, const BeatState 
 
 void add_css(void);
 GtkWidget *build_ui(App *app);
-int wallpaper_main(const char *path, int fps, gboolean vsync);
+int wallpaper_main(const char *path, int fps, gboolean vsync, int speed_percent, gboolean chroma_enabled, const float key[3], float smoothing);
 
 #endif

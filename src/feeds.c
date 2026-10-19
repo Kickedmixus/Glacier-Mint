@@ -10,16 +10,12 @@
 
 #define FEED_FFT 2048
 #define FEED_RATE 44100
-#define FEED_OUTPUT_LIMIT 65536
 
-typedef struct { char *command, *output; int interval; gint64 next_run; } TerminalJob;
-
-/* Live data for widgets. Three threads fill it: stats and media every second, terminal commands on their
-   own interval, and audio while an EQ widget exists. Readers copy it out with widget_feed_snapshot(). */
+/* Live data for widgets. Stats and media update every second; audio runs while an EQ widget exists. */
 struct WidgetFeed {
     GMutex lock; GCond wake; gboolean running, want_stats, want_media, want_audio; gint stopping;
-    GThread *stats_thread, *terminal_thread, *audio_thread; GPid terminal_pid, audio_pid;
-    char *player_filter, *art_url; GHashTable *jobs; gint64 position_at;
+    GThread *stats_thread, *audio_thread; GPid audio_pid;
+    char *player_filter, *art_url; gint64 position_at;
     WidgetSnapshot data; float history[FEED_METRICS][FEED_HISTORY]; int history_next;
 };
 
@@ -191,69 +187,6 @@ static gpointer stats_thread(gpointer data) {
     g_mutex_unlock(&feed->lock); if (bus) g_object_unref(bus); g_free(state.gpu_busy); g_free(state.cpu_temp); g_free(state.gpu_temp); return NULL;
 }
 
-/* Terminal commands. Output is cleaned of escape codes so it reads like a plain terminal. */
-
-static char *clean_output(const char *raw, gsize length) {
-    GString *out = g_string_new(NULL), *line = g_string_new(NULL); const char *p = raw, *end = raw + length;
-    while (p < end) {
-        unsigned char ch = (unsigned char)*p;
-        if (ch == 0x1b && p + 1 < end) {
-            p++;
-            if (*p == '[') { p++; while (p < end && !(*p >= 0x40 && *p <= 0x7e)) p++; if (p < end) p++; }
-            else if (*p == ']') { while (p < end && *p != '\a' && !(*p == 0x1b && p + 1 < end && p[1] == '\\')) p++; p += p < end && *p == 0x1b ? 2 : 1; }
-            else p++;
-            continue;
-        }
-        if (ch == '\r') { if (p + 1 < end && p[1] == '\n') { p++; continue; } g_string_truncate(line, 0); p++; continue; }
-        if (ch == '\n') { g_string_append_len(out, line->str, line->len); g_string_append_c(out, '\n'); g_string_truncate(line, 0); p++; continue; }
-        if (ch == '\t') { long column = g_utf8_strlen(line->str, line->len); do g_string_append_c(line, ' '); while (++column % 8); p++; continue; }
-        if (ch < 0x20 || ch == 0x7f) { p++; continue; }
-        g_string_append_c(line, *p++);
-    }
-    g_string_append_len(out, line->str, line->len); g_string_free(line, TRUE);
-    char *valid = g_utf8_make_valid(out->str, out->len); g_string_free(out, TRUE); return valid;
-}
-
-static void own_process_group(gpointer data) { (void)data; setpgid(0, 0); }
-
-static char *run_command(WidgetFeed *feed, const char *command) {
-    char *script = g_strdup_printf("{ %s\n} 2>&1", command), *argv[] = { "/bin/sh", "-c", script, NULL }, **env = g_get_environ(); GPid pid = 0; int out = -1; GError *error = NULL;
-    env = g_environ_setenv(env, "TERM", "dumb", TRUE); env = g_environ_setenv(env, "NO_COLOR", "1", TRUE);
-    gboolean started = g_spawn_async_with_pipes(NULL, argv, env, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_STDERR_TO_DEV_NULL, own_process_group, NULL, &pid, NULL, &out, NULL, &error);
-    g_strfreev(env); g_free(script);
-    if (!started) { char *message = g_strdup(error->message); g_error_free(error); return message; }
-    g_mutex_lock(&feed->lock); feed->terminal_pid = pid; gboolean running = feed->running; g_mutex_unlock(&feed->lock);
-    GString *output = g_string_new(NULL); gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC; gboolean finished = FALSE; char buffer[4096];
-    while (running && g_get_monotonic_time() < deadline) {
-        struct pollfd poll_fd = { out, POLLIN, 0 }; int ready = poll(&poll_fd, 1, 100);
-        if (ready > 0) { ssize_t n = read(out, buffer, sizeof(buffer)); if (n <= 0) { finished = TRUE; break; } g_string_append_len(output, buffer, n); if (output->len > FEED_OUTPUT_LIMIT) g_string_erase(output, 0, output->len - FEED_OUTPUT_LIMIT); }
-        g_mutex_lock(&feed->lock); running = feed->running; g_mutex_unlock(&feed->lock);
-    }
-    if (!finished) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }
-    close(out); waitpid(pid, NULL, 0); g_spawn_close_pid(pid);
-    g_mutex_lock(&feed->lock); feed->terminal_pid = 0; g_mutex_unlock(&feed->lock);
-    if (!finished && running) g_string_append(output, "\n[timed out after 10 s]");
-    char *cleaned = clean_output(output->str, output->len); g_string_free(output, TRUE); return cleaned;
-}
-
-static gpointer terminal_thread(gpointer data) {
-    WidgetFeed *feed = data; g_mutex_lock(&feed->lock);
-    while (feed->running) {
-        gint64 now = g_get_monotonic_time(), next = now + G_USEC_PER_SEC; TerminalJob *due = NULL; GHashTableIter iter; gpointer value;
-        g_hash_table_iter_init(&iter, feed->jobs);
-        while (g_hash_table_iter_next(&iter, NULL, &value)) { TerminalJob *job = value; if (job->next_run <= now) { due = job; break; } next = MIN(next, job->next_run); }
-        if (!due) { g_cond_wait_until(&feed->wake, &feed->lock, next); continue; }
-        char *command = g_strdup(due->command); due->next_run = now + (gint64)due->interval * G_USEC_PER_SEC; g_mutex_unlock(&feed->lock);
-        char *output = run_command(feed, command);
-        g_mutex_lock(&feed->lock); TerminalJob *job = g_hash_table_lookup(feed->jobs, command);
-        if (job) { g_free(job->output); job->output = output; } else g_free(output);
-        g_free(command);
-    }
-    g_mutex_unlock(&feed->lock); return NULL;
-}
-
-static void terminal_job_free(TerminalJob *job) { g_free(job->command); g_free(job->output); g_free(job); }
-
 /* Audio: captures what is playing from the default output's monitor and turns it into log-spaced bands. */
 
 static void fft(float *re, float *im, int n) {
@@ -320,38 +253,24 @@ static gpointer audio_thread(gpointer data) {
 
 WidgetFeed *widget_feed_new(gboolean editing) {
     WidgetFeed *feed = g_new0(WidgetFeed, 1); g_mutex_init(&feed->lock); g_cond_init(&feed->wake); feed->running = TRUE; feed->data.editing = editing;
-    feed->jobs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)terminal_job_free);
-    feed->stats_thread = g_thread_new("widget-stats", stats_thread, feed); feed->terminal_thread = g_thread_new("widget-terminal", terminal_thread, feed);
+    feed->stats_thread = g_thread_new("widget-stats", stats_thread, feed);
     return feed;
 }
 
 void widget_feed_sync(WidgetFeed *feed, GPtrArray *widgets) {
     if (!feed) return;
-    gboolean stats = FALSE, media = FALSE, audio = FALSE; const char *player = ""; GHashTable *wanted = g_hash_table_new(g_str_hash, g_str_equal);
+    gboolean stats = FALSE, media = FALSE, audio = FALSE; const char *player = "";
     for (guint i = 0; widgets && i < widgets->len; i++) {
         DeskWidget *widget = g_ptr_array_index(widgets, i);
         if (!strcmp(widget->kind, "stats")) stats = TRUE;
         else if (!strcmp(widget->kind, "eq")) audio = TRUE;
         else if (!strcmp(widget->kind, "playback")) { media = TRUE; if (!player[0]) player = desk_widget_get(widget, "player"); }
-        else if (!strcmp(widget->kind, "terminal")) {
-            const char *command = desk_widget_get(widget, "command"); int interval = desk_widget_int(widget, "interval"), current = GPOINTER_TO_INT(g_hash_table_lookup(wanted, command));
-            if (command[0]) g_hash_table_insert(wanted, (gpointer)command, GINT_TO_POINTER(current ? MIN(current, interval) : interval));
-        }
     }
-    g_mutex_lock(&feed->lock); gint64 now = g_get_monotonic_time();
+    g_mutex_lock(&feed->lock);
     feed->want_stats = stats; feed->want_media = media; g_free(feed->player_filter); feed->player_filter = g_strdup(player);
-    GHashTableIter iter; gpointer key, value; g_hash_table_iter_init(&iter, feed->jobs);
-    while (g_hash_table_iter_next(&iter, &key, NULL)) if (!g_hash_table_contains(wanted, key)) g_hash_table_iter_remove(&iter);
-    g_hash_table_iter_init(&iter, wanted);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        TerminalJob *job = g_hash_table_lookup(feed->jobs, key); int interval = GPOINTER_TO_INT(value);
-        if (!job) { job = g_new0(TerminalJob, 1); job->command = g_strdup(key); g_hash_table_insert(feed->jobs, g_strdup(key), job); }
-        else if (interval < job->interval) job->next_run = MIN(job->next_run, now + (gint64)interval * G_USEC_PER_SEC);
-        job->interval = interval;
-    }
     GThread *stop_audio = !audio && feed->audio_thread ? feed->audio_thread : NULL; gboolean start_audio = audio && !feed->audio_thread;
     feed->want_audio = audio; if (stop_audio) { feed->audio_thread = NULL; if (feed->audio_pid) kill(feed->audio_pid, SIGTERM); }
-    g_cond_broadcast(&feed->wake); g_mutex_unlock(&feed->lock); g_hash_table_destroy(wanted);
+    g_cond_broadcast(&feed->wake); g_mutex_unlock(&feed->lock);
     if (stop_audio) g_thread_join(stop_audio);
     if (start_audio) feed->audio_thread = g_thread_new("widget-audio", audio_thread, feed);
 }
@@ -364,25 +283,21 @@ void widget_feed_snapshot(WidgetFeed *feed, WidgetSnapshot *snapshot) {
     if (feed->data.playing) snapshot->position_us += g_get_monotonic_time() - feed->position_at;
     if (snapshot->length_us > 0) snapshot->position_us = CLAMP(snapshot->position_us, 0, snapshot->length_us);
     for (int m = 0; m < FEED_METRICS; m++) for (int i = 0; i < feed->data.history_count; i++) snapshot->history[m][i] = feed->history[m][(feed->history_next - feed->data.history_count + i + FEED_HISTORY) % FEED_HISTORY];
-    snapshot->outputs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free); GHashTableIter iter; gpointer value; g_hash_table_iter_init(&iter, feed->jobs);
-    while (g_hash_table_iter_next(&iter, NULL, &value)) { TerminalJob *job = value; if (job->output) g_hash_table_replace(snapshot->outputs, g_strdup(job->command), g_strdup(job->output)); }
     g_mutex_unlock(&feed->lock);
 }
 
 void widget_snapshot_clear(WidgetSnapshot *snapshot) {
     g_free(snapshot->title); g_free(snapshot->artist); g_free(snapshot->album); g_free(snapshot->player);
     if (snapshot->art) cairo_surface_destroy(snapshot->art);
-    if (snapshot->outputs) g_hash_table_destroy(snapshot->outputs);
     memset(snapshot, 0, sizeof(*snapshot));
 }
 
 void widget_feed_free(WidgetFeed *feed) {
     if (!feed) return;
     g_atomic_int_set(&feed->stopping, 1); g_mutex_lock(&feed->lock); feed->running = FALSE; feed->want_audio = FALSE;
-    if (feed->terminal_pid) { kill(-feed->terminal_pid, SIGKILL); kill(feed->terminal_pid, SIGKILL); }
     if (feed->audio_pid) kill(feed->audio_pid, SIGTERM);
     g_cond_broadcast(&feed->wake); g_mutex_unlock(&feed->lock);
-    g_thread_join(feed->stats_thread); g_thread_join(feed->terminal_thread); if (feed->audio_thread) g_thread_join(feed->audio_thread);
+    g_thread_join(feed->stats_thread); if (feed->audio_thread) g_thread_join(feed->audio_thread);
     g_free(feed->data.title); g_free(feed->data.artist); g_free(feed->data.album); g_free(feed->data.player); if (feed->data.art) cairo_surface_destroy(feed->data.art);
-    g_free(feed->player_filter); g_free(feed->art_url); g_hash_table_destroy(feed->jobs); g_mutex_clear(&feed->lock); g_cond_clear(&feed->wake); g_free(feed);
+    g_free(feed->player_filter); g_free(feed->art_url); g_mutex_clear(&feed->lock); g_cond_clear(&feed->wake); g_free(feed);
 }

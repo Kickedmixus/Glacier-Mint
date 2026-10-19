@@ -60,12 +60,21 @@ static double preview_scale(App *app, gboolean vertical) {
 
 static gboolean draw_wallpaper_widget(GtkWidget *area, cairo_t *cr, GtkWidget *box) {
     (void)area; App *app = g_object_get_data(G_OBJECT(box), "widget-app"); DeskWidget *widget = desk_of(box); if (!app || !widget) return FALSE;
-    cairo_save(cr); cairo_scale(cr, preview_scale(app, FALSE), preview_scale(app, TRUE)); desk_widget_draw(cr, widget, &app->widget_snapshot); cairo_restore(cr); return FALSE;
+    cairo_save(cr); cairo_scale(cr, preview_scale(app, FALSE), preview_scale(app, TRUE)); desk_widget_draw(cr, widget, &app->widget_snapshot); cairo_restore(cr);
+    if (app->selected_widget == box) {
+        double width = gtk_widget_get_allocated_width(area), height = gtk_widget_get_allocated_height(area);
+        cairo_set_source_rgba(cr, 1.0, 0.85, 0.15, 0.95); cairo_set_line_width(cr, 2.0);
+        cairo_rectangle(cr, 1.0, 1.0, MAX(1.0, width - 2.0), MAX(1.0, height - 2.0)); cairo_stroke(cr);
+    }
+    return FALSE;
 }
+
+static void set_widget_normalized_position(GtkWidget *box, App *app, double x, double y);
 
 static void refresh_widget_size(App *app, GtkWidget *box) {
     GtkWidget *area = g_object_get_data(G_OBJECT(box), "widget-label"); int width, height; desk_widget_measure(desk_of(box), &app->widget_snapshot, &width, &height);
-    gtk_widget_set_size_request(area, MAX(1, (int)ceil(width * preview_scale(app, FALSE))), MAX(1, (int)ceil(height * preview_scale(app, TRUE)))); gtk_widget_queue_draw(area);
+    gtk_widget_set_size_request(area, MAX(1, (int)ceil(width * preview_scale(app, FALSE))), MAX(1, (int)ceil(height * preview_scale(app, TRUE))));
+    DeskWidget *widget = desk_of(box); set_widget_normalized_position(box, app, widget->x, widget->y); gtk_widget_queue_draw(area);
 }
 
 /* Runs every 33 ms; each widget redraws only when its own refresh interval has passed. */
@@ -99,10 +108,13 @@ static void sync_widget_feed(App *app) { GPtrArray *list = desk_widget_list(app)
 static void wallpaper_widgets_changed(App *app) { sync_widget_feed(app); invalidate_wallpaper_widgets(app); update_widget_labels(app); save_wallpaper_widgets(app); }
 
 static void set_widget_normalized_position(GtkWidget *box, App *app, double x, double y) {
-    DeskWidget *widget = desk_of(box); widget->x = CLAMP(x, 0.0, 1.0); widget->y = CLAMP(y, 0.0, 1.0);
+    DeskWidget *widget = desk_of(box); int widget_width, widget_height;
+    desk_widget_measure(widget, &app->widget_snapshot, &widget_width, &widget_height);
+    desk_widget_clamp_position(app->widget_screen_width, app->widget_screen_height, widget_width, widget_height, &x, &y);
+    widget->x = x; widget->y = y;
     int width = gtk_widget_get_allocated_width(app->widget_canvas), height = gtk_widget_get_allocated_height(app->widget_canvas);
-    if (width > 0) gtk_widget_set_margin_start(box, (int)(widget->x * width));
-    if (height > 0) gtk_widget_set_margin_top(box, (int)(widget->y * height));
+    if (width > 0) gtk_widget_set_margin_start(box, (int)round(widget->x * width));
+    if (height > 0) gtk_widget_set_margin_top(box, (int)round(widget->y * height));
 }
 
 static void snap_widget_position(App *app, GtkWidget *widget, int left, int top) {
@@ -315,10 +327,13 @@ static void widget_style_changed(GtkWidget *control, App *app) {
 
 static void select_wallpaper_widget(App *app, GtkWidget *box) {
     if (app->selected_widget == box) return;
-    if (app->selected_widget) gtk_style_context_remove_class(gtk_widget_get_style_context(app->selected_widget), "wallpaper-widget-selected");
+    GtkWidget *old = app->selected_widget;
+    if (old) gtk_style_context_remove_class(gtk_widget_get_style_context(old), "wallpaper-widget-selected");
     app->selected_widget = box;
     if (box) gtk_style_context_add_class(gtk_widget_get_style_context(box), "wallpaper-widget-selected");
     update_widget_inspector(app);
+    if (old) gtk_widget_queue_draw(g_object_get_data(G_OBJECT(old), "widget-label"));
+    if (box) gtk_widget_queue_draw(g_object_get_data(G_OBJECT(box), "widget-label"));
 }
 
 static void delete_selected_widget(GtkButton *button, App *app) {
@@ -390,6 +405,12 @@ void add_css(void) {
         "* { border-radius: 0; } window, notebook, notebook stack { background: #020304; color: #dce5e8; } notebook header { background: #010203; border-bottom: 1px solid #182126; } notebook tab { padding: 11px 22px; color: #59666d; border: 0; } notebook tab:checked { color: #a9e0ef; border-bottom: 2px solid #a9e0ef; } .brand { font-size: 21px; font-weight: 600; color: #e5f0f2; } .muted, .row-subtitle { color: #596970; } .section { margin-top: 12px; margin-bottom: 5px; font-size: 11px; font-weight: 700; letter-spacing: 1px; color: #8fcbdc; } entry, combobox, button { min-height: 32px; border: 1px solid #202b30; background: #111518; color: #dce5e8; box-shadow: none; } entry:focus, textview:focus { border: 1px solid #a9e0ef; } button:hover { background: #1a2226; border-color: #7899a3; } button.suggested-action { background: #a9e0ef; color: #081013; border-color: #a9e0ef; } button.suggested-action:hover { background: #c6edf5; } .preview, .thumb { border: 1px solid #202b30; } .wallpaper-widget { padding: 0; border: 1px solid #a9e0ef; background: transparent; color: #e5f0f2; } .wallpaper-widget-selected { border-color: #ffd84a; box-shadow: 0 0 0 1px #ffd84a; } .row-title { font-weight: 600; color: #dce8eb; } flowbox { padding: 2px; } flowboxchild { padding: 4px; border: 1px solid #1b2428; background: #0d1113; } flowboxchild:hover { border-color: #334950; } flowboxchild:selected { border-color: #a9e0ef; background: #111b1f; } textview { background: #050607; color: #d1e1e6; border: 1px solid #202b30; } scrolledwindow { border: 1px solid #172024; }", -1, NULL); gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION); GtkCssProvider *compact_css = gtk_css_provider_new(); gtk_css_provider_load_from_data(compact_css, ".selected-control { min-height: 0; padding: 0 4px; font-size: 9px; } .selected-scroll { border: 1px solid #172024; }", -1, NULL); gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(compact_css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION); g_object_unref(compact_css); g_object_unref(css);
 }
 
+static void shader_display_option_changed(GtkWidget *control, App *app) {
+    (void)control;
+    if (app->preview) gtk_gl_area_queue_render(GTK_GL_AREA(app->preview));
+    if (app->widget_preview) gtk_gl_area_queue_render(GTK_GL_AREA(app->widget_preview));
+}
+
 GtkWidget *build_ui(App *app) {
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); app->notebook = gtk_notebook_new(); gtk_notebook_set_tab_pos(GTK_NOTEBOOK(app->notebook), GTK_POS_TOP); gtk_box_pack_start(GTK_BOX(root), app->notebook, TRUE, TRUE, 0);
     GtkWidget *local_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); gtk_container_set_border_width(GTK_CONTAINER(local_page), 24);
@@ -400,7 +421,14 @@ GtkWidget *build_ui(App *app) {
     GtkWidget *selected_strip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); gtk_widget_set_size_request(selected_strip, -1, 160); gtk_widget_set_vexpand(selected_strip, FALSE); app->preview = gtk_gl_area_new(); gtk_widget_set_size_request(app->preview, 260, 160); gtk_style_context_add_class(gtk_widget_get_style_context(app->preview), "preview"); gtk_box_pack_start(GTK_BOX(selected_strip), app->preview, FALSE, FALSE, 0); g_signal_connect(app->preview, "realize", G_CALLBACK(preview_realize), app); g_signal_connect(app->preview, "render", G_CALLBACK(preview_render), app);
     GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); gtk_widget_set_size_request(controls, 160, 160); GtkWidget *apply = gtk_button_new_with_label("Set as current wallpaper"); gtk_style_context_add_class(gtk_widget_get_style_context(apply), "suggested-action"); gtk_style_context_add_class(gtk_widget_get_style_context(apply), "selected-control"); gtk_widget_set_hexpand(apply, TRUE); gtk_widget_set_vexpand(apply, TRUE); gtk_box_pack_start(GTK_BOX(controls), apply, TRUE, TRUE, 0); g_signal_connect(apply, "clicked", G_CALLBACK(apply_clicked), app); GtkWidget *stop = gtk_button_new_with_label("Stop wallpaper"); gtk_style_context_add_class(gtk_widget_get_style_context(stop), "selected-control"); gtk_widget_set_hexpand(stop, TRUE); gtk_widget_set_vexpand(stop, TRUE); gtk_box_pack_start(GTK_BOX(controls), stop, TRUE, TRUE, 0); g_signal_connect(stop, "clicked", G_CALLBACK(stop_clicked), app); GtkWidget *delete_button = gtk_button_new_with_label("Delete selected"); gtk_style_context_add_class(gtk_widget_get_style_context(delete_button), "selected-control"); gtk_widget_set_hexpand(delete_button, TRUE); gtk_widget_set_vexpand(delete_button, TRUE); gtk_box_pack_start(GTK_BOX(controls), delete_button, TRUE, TRUE, 0); g_signal_connect(delete_button, "clicked", G_CALLBACK(delete_selected_clicked), app); GtkWidget *open = gtk_button_new_with_label("Open on Shadertoy"); gtk_style_context_add_class(gtk_widget_get_style_context(open), "selected-control"); gtk_widget_set_hexpand(open, TRUE); gtk_widget_set_vexpand(open, TRUE); gtk_box_pack_start(GTK_BOX(controls), open, TRUE, TRUE, 0); g_signal_connect(open, "clicked", G_CALLBACK(open_clicked), app); gtk_box_pack_start(GTK_BOX(selected_strip), controls, FALSE, FALSE, 0);
     GtkWidget *constants_panel = gtk_frame_new("Shader constants"); gtk_widget_set_size_request(constants_panel, 300, 160); gtk_widget_set_hexpand(constants_panel, TRUE); GtkWidget *constants_outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); gtk_container_set_border_width(GTK_CONTAINER(constants_outer), 0); gtk_container_add(GTK_CONTAINER(constants_panel), constants_outer); GtkWidget *constants_scroll = gtk_scrolled_window_new(NULL, NULL); gtk_style_context_add_class(gtk_widget_get_style_context(constants_scroll), "selected-scroll"); gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(constants_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC); gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(constants_scroll), 0); gtk_widget_set_vexpand(constants_scroll, TRUE); app->constants_box = gtk_grid_new(); gtk_grid_set_row_spacing(GTK_GRID(app->constants_box), 0); gtk_grid_set_column_spacing(GTK_GRID(app->constants_box), 0); gtk_container_add(GTK_CONTAINER(constants_scroll), app->constants_box); gtk_box_pack_start(GTK_BOX(constants_outer), constants_scroll, TRUE, TRUE, 0); GtkWidget *constants_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); GtkWidget *constants_apply = gtk_button_new_with_label("Apply"); gtk_box_pack_end(GTK_BOX(constants_buttons), constants_apply, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(constants_outer), constants_buttons, FALSE, FALSE, 0); g_signal_connect(constants_apply, "clicked", G_CALLBACK(apply_constants_clicked), app); gtk_box_pack_start(GTK_BOX(selected_strip), constants_panel, TRUE, TRUE, 0); gtk_box_pack_start(GTK_BOX(local_page), selected_strip, FALSE, FALSE, 0);
-    app->status = gtk_label_new("Choose a shader to begin"); gtk_widget_set_halign(app->status, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(app->status), "muted"); gtk_box_pack_start(GTK_BOX(local_page), app->status, FALSE, FALSE, 0); gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), local_page, gtk_label_new("Wallpapers"));
+    GtkWidget *chroma_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); GtkWidget *chroma_label = gtk_label_new("Chroma key"); gtk_widget_set_halign(chroma_label, GTK_ALIGN_START); gtk_box_pack_start(GTK_BOX(chroma_row), chroma_label, FALSE, FALSE, 0);
+    app->chroma_enable = gtk_check_button_new_with_label("Reveal background"); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_enable, FALSE, FALSE, 0);
+    GdkRGBA chroma_default = { 0.0, 1.0, 0.0, 1.0 }; app->chroma_color = gtk_color_button_new_with_rgba(&chroma_default); gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(app->chroma_color), FALSE); gtk_widget_set_tooltip_text(app->chroma_color, "Key color; click a pixel in the selected preview to pick it"); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_color, FALSE, FALSE, 0);
+    GtkWidget *pick_hint = gtk_label_new("Click preview to pick"); gtk_style_context_add_class(gtk_widget_get_style_context(pick_hint), "muted"); gtk_box_pack_start(GTK_BOX(chroma_row), pick_hint, FALSE, FALSE, 0);
+    GtkWidget *smooth_label = gtk_label_new("Smoothing"); gtk_box_pack_start(GTK_BOX(chroma_row), smooth_label, FALSE, FALSE, 4); app->chroma_smoothing = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.005, 0.30, 0.005); gtk_range_set_value(GTK_RANGE(app->chroma_smoothing), 0.06); gtk_scale_set_digits(GTK_SCALE(app->chroma_smoothing), 3); gtk_widget_set_size_request(app->chroma_smoothing, 150, -1); gtk_scale_set_draw_value(GTK_SCALE(app->chroma_smoothing), TRUE); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_smoothing, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(local_page), chroma_row, FALSE, FALSE, 6);
+    g_signal_connect(app->chroma_enable, "toggled", G_CALLBACK(shader_display_option_changed), app); g_signal_connect(app->chroma_color, "color-set", G_CALLBACK(shader_display_option_changed), app); g_signal_connect(app->chroma_smoothing, "value-changed", G_CALLBACK(shader_display_option_changed), app);
+    app->status = gtk_label_new("Choose a shader to begin"); gtk_widget_set_halign(app->status, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(app->status), "muted"); gtk_box_pack_start(GTK_BOX(local_page), app->status, FALSE, FALSE, 0);
+    GtkWidget *speed_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8); GtkWidget *speed_label = gtk_label_new("Shader speed"); gtk_widget_set_halign(speed_label, GTK_ALIGN_START); gtk_box_pack_start(GTK_BOX(speed_row), speed_label, FALSE, FALSE, 0); app->speed = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.0, 200.0, 1.0); gtk_range_set_value(GTK_RANGE(app->speed), 100.0); gtk_scale_set_digits(GTK_SCALE(app->speed), 0); gtk_scale_set_draw_value(GTK_SCALE(app->speed), TRUE); gtk_scale_set_value_pos(GTK_SCALE(app->speed), GTK_POS_RIGHT); gtk_widget_set_hexpand(app->speed, TRUE); gtk_widget_set_tooltip_text(app->speed, "Animation speed percentage; 100% is normal"); gtk_box_pack_start(GTK_BOX(speed_row), app->speed, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(local_page), speed_row, FALSE, FALSE, 0); g_signal_connect(app->speed, "value-changed", G_CALLBACK(shader_display_option_changed), app); gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), local_page, gtk_label_new("Wallpapers"));
 
     app->wallpaper_widgets = g_ptr_array_new(); GdkDisplay *display = gdk_display_get_default(); app->widget_screen_width = 0; app->widget_screen_height = 0;
 #ifdef GDK_WINDOWING_X11

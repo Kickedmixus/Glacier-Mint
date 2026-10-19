@@ -20,11 +20,10 @@ Add widgets with the **+** button on the Widgets tab, drag them into place, and 
 | PC performance | CPU, GPU, RAM, swap, disk, temperatures, network, uptime | bars, graphs or text; which rows to show; bar length |
 | Audio EQ | Spectrum of whatever is playing | bars, mirrored, line or dots; bar count, size, gap, sensitivity, smoothing, peak caps |
 | Now playing | Title, artist, album art, progress and play state from any MPRIS player (Spotify, Firefox, VLC…) | layout, art size, which lines to show, player filter, hide when idle |
-| Terminal | Output of a shell command, rerun on an interval, in a terminal-style window | command, refresh interval, lines, columns, title bar, prompt, cursor |
 
 The editor preview and the wallpaper use the same drawing code, so what you see in the Widgets tab is what appears on the desktop; the running wallpaper picks up changes within a quarter second. Widgets are saved to `~/.local/share/glacier-mint/widgets.ini`; an older `widgets.conf` is converted the first time the editor opens.
 
-Data sources: GPU load is read from `gpu_busy_percent` (AMD; other GPUs show n/a), temperatures from hwmon, and the EQ captures the default output's monitor with `parec` (part of `pulseaudio-utils`, which also works on PipeWire), only while an EQ widget exists. The desktop wallpaper sits behind the file manager's icons, so widgets are display-only and the Now playing widget cannot take clicks. Terminal commands run through `/bin/sh` with a 10 second limit and have their color codes removed.
+Data sources: GPU load is read from `gpu_busy_percent` (AMD; other GPUs show n/a), temperatures from hwmon, and the EQ captures the default output's monitor with `parec` (part of `pulseaudio-utils`, which also works on PipeWire), only while an EQ widget exists. The desktop wallpaper sits behind the file manager's icons, so widgets are display-only and the Now playing widget cannot take clicks.
 
 ## Build and run
 
