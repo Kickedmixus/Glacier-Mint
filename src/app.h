@@ -57,13 +57,13 @@ typedef struct {
 typedef struct {
     GLuint program;
     GLint resolution, time, time_delta, frame_rate, frame;
-    GLint beat, bpm, audio_level, audio_bass, sample_rate, mouse, chroma_key, chroma_smooth, chroma_preview;
+    GLint beat, bpm, audio_level, audio_bass, sample_rate, mouse, chroma_key, chroma_smooth, chroma_opacity, chroma_preview;
     GLint background_sampler, background_resolution, background_enabled;
     GLint channel[4], channel_resolution[4];
     int channel_widths[4], channel_heights[4];
     float resolution_value[3], time_value, beat_value, bpm_value;
     int frame_value;
-    float audio_level_value, audio_bass_value, chroma_key_value[4], chroma_smooth_value;
+    float audio_level_value, audio_bass_value, chroma_key_value[4], chroma_smooth_value, chroma_opacity_value;
     gboolean use_dsa, values_valid, channels_valid, audio_valid, chroma_preview_valid, chroma_preview_value, background_valid, background_value;
     GLuint background_texture;
     int background_width, background_height;
@@ -71,7 +71,7 @@ typedef struct {
 
 typedef struct {
     GtkWidget *window, *notebook, *preview, *widget_canvas, *widget_preview, *widget_grid, *widget_settings_panel, *widget_settings_name, *widget_settings_font, *widget_settings_size, *widget_settings_width, *widget_settings_bold, *widget_settings_italic, *widget_settings_gradient, *widget_settings_color, *widget_settings_gradient_color, *widget_settings_box, *widget_settings_box_color, *widget_settings_border, *widget_settings_radius, *widget_settings_spacing, *widget_settings_stretch_x, *widget_settings_stretch_y, *results, *local_list, *status;
-    GtkWidget *search, *api_key, *fps, *scale, *speed, *chroma_enable, *chroma_color, *chroma_smoothing, *code_view, *browser, *browser_url, *constants_box, *toy_status;
+    GtkWidget *search, *api_key, *fps, *scale, *speed, *chroma_enable, *chroma_color, *chroma_smoothing, *chroma_opacity, *code_view, *browser, *browser_url, *constants_box, *toy_status;
     GtkWidget *widget_settings_scale, *widget_settings_accent, *widget_settings_secondary, *widget_settings_options, *vsync, *settings_status;
     int monitor_refresh;
     WidgetFeed *widget_feed;
@@ -108,7 +108,7 @@ GLuint make_program_for_shader(const char *user_source, const char *shader_path,
 void shader_uniforms_init(ShaderUniforms *uniforms, GLuint program);
 void shader_set_uniforms(ShaderUniforms *uniforms, float width, float height, float time_s, int frame);
 void shader_set_audio_uniforms(ShaderUniforms *uniforms, const BeatClock *clock, const BeatState *state);
-void shader_set_effects(ShaderUniforms *uniforms, gboolean chroma_enabled, const float key[3], float smoothing);
+void shader_set_effects(ShaderUniforms *uniforms, gboolean chroma_enabled, const float key[3], float smoothing, float opacity);
 void shader_set_preview_background(ShaderUniforms *uniforms, gboolean enabled);
 void shader_set_background(ShaderUniforms *uniforms, GLuint texture, int width, int height, gboolean enabled);
 gboolean load_preview(App *app, const char *source, const char *title, const char *id);
@@ -192,6 +192,6 @@ void beat_clock_update(BeatClock *clock, double dt, double now, const BeatState 
 
 void add_css(void);
 GtkWidget *build_ui(App *app);
-int wallpaper_main(const char *path, int fps, gboolean vsync, int speed_percent, gboolean chroma_enabled, const float key[3], float smoothing);
+int wallpaper_main(const char *path, int fps, gboolean vsync, int speed_percent, gboolean chroma_enabled, const float key[3], float smoothing, int opacity_percent);
 
 #endif

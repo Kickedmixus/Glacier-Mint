@@ -180,7 +180,7 @@ void shader_uniforms_init(ShaderUniforms *uniforms, GLuint program) {
     uniforms->bpm = glGetUniformLocation(program, "iBPM"); uniforms->audio_level = glGetUniformLocation(program, "iAudioLevel");
     uniforms->audio_bass = glGetUniformLocation(program, "iAudioBass"); uniforms->sample_rate = glGetUniformLocation(program, "iSampleRate");
     uniforms->mouse = glGetUniformLocation(program, "iMouse"); uniforms->chroma_key = glGetUniformLocation(program, "iChromaKey");
-    uniforms->chroma_smooth = glGetUniformLocation(program, "iChromaSmooth"); uniforms->chroma_preview = glGetUniformLocation(program, "iChromaPreview");
+    uniforms->chroma_smooth = glGetUniformLocation(program, "iChromaSmooth"); uniforms->chroma_opacity = glGetUniformLocation(program, "iChromaOpacity"); uniforms->chroma_preview = glGetUniformLocation(program, "iChromaPreview");
     uniforms->background_sampler = glGetUniformLocation(program, "glacierBackground"); uniforms->background_resolution = glGetUniformLocation(program, "glacierBackgroundResolution"); uniforms->background_enabled = glGetUniformLocation(program, "glacierBackgroundEnabled");
     for (int i = 0; i < 4; i++) {
         char name[40]; g_snprintf(name, sizeof(name), "iChannel%d", i); uniforms->channel[i] = glGetUniformLocation(program, name);
@@ -189,7 +189,7 @@ void shader_uniforms_init(ShaderUniforms *uniforms, GLuint program) {
     }
 }
 
-void shader_set_effects(ShaderUniforms *uniforms, gboolean chroma_enabled, const float key[3], float smoothing) {
+void shader_set_effects(ShaderUniforms *uniforms, gboolean chroma_enabled, const float key[3], float smoothing, float opacity) {
     float values[4] = { key[0], key[1], key[2], chroma_enabled ? 1.0f : 0.0f };
     if (!uniforms->use_dsa) glUseProgram(uniforms->program);
     if (!uniforms->values_valid || memcmp(uniforms->chroma_key_value, values, sizeof(values)) != 0) {
@@ -198,6 +198,9 @@ void shader_set_effects(ShaderUniforms *uniforms, gboolean chroma_enabled, const
     }
     if (!uniforms->values_valid || uniforms->chroma_smooth_value != smoothing) {
         uniform1f(uniforms, uniforms->chroma_smooth, smoothing); uniforms->chroma_smooth_value = smoothing;
+    }
+    if (!uniforms->values_valid || uniforms->chroma_opacity_value != opacity) {
+        uniform1f(uniforms, uniforms->chroma_opacity, opacity); uniforms->chroma_opacity_value = opacity;
     }
 }
 
@@ -221,12 +224,13 @@ void shader_set_background(ShaderUniforms *uniforms, GLuint texture, int width, 
     uniforms->background_valid = TRUE;
 }
 
-static void app_effect_values(App *app, gboolean *enabled, float key[3], float *smoothing) {
+static void app_effect_values(App *app, gboolean *enabled, float key[3], float *smoothing, float *opacity) {
     GdkRGBA color = { 0.0, 1.0, 0.0, 1.0 };
     *enabled = app->chroma_enable && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->chroma_enable));
     if (app->chroma_color) gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(app->chroma_color), &color);
     key[0] = (float)color.red; key[1] = (float)color.green; key[2] = (float)color.blue;
     *smoothing = app->chroma_smoothing ? (float)gtk_range_get_value(GTK_RANGE(app->chroma_smoothing)) : 0.06f;
+    *opacity = app->chroma_opacity ? (float)gtk_range_get_value(GTK_RANGE(app->chroma_opacity)) / 100.0f : 1.0f;
 }
 
 static gboolean preview_pick_color(GtkWidget *widget, GdkEventButton *event, App *app) {
@@ -303,13 +307,13 @@ static const char *fragment_header =
     "uniform float iFrameRate; uniform int iFrame;\n"
     "uniform float iChannelTime[4]; uniform vec3 iChannelResolution[4];\n"
     "uniform vec4 iMouse; uniform vec4 iDate; uniform float iSampleRate;\n"
-    "uniform vec4 iChromaKey; uniform float iChromaSmooth; uniform float iChromaPreview;\n"
+    "uniform vec4 iChromaKey; uniform float iChromaSmooth; uniform float iChromaOpacity; uniform float iChromaPreview;\n"
     "uniform sampler2D glacierBackground; uniform vec2 glacierBackgroundResolution; uniform float glacierBackgroundEnabled;\n"
     "uniform float iBeat; uniform float iBPM; uniform float iAudioLevel; uniform float iAudioBass;\n"
     "out vec4 glacierColor;\n";
 
 static const char *fragment_footer =
-    "void main() { vec4 c = vec4(0.0); mainImage(c, gl_FragCoord.xy); float alpha = 1.0; vec3 renderedColor = c.rgb; if (iChromaKey.a > 0.5) { float d = distance(c.rgb, iChromaKey.rgb); float edge = max(iChromaSmooth, 0.0001); alpha = smoothstep(edge, edge + 0.035, d); if (iChromaPreview > 0.5) { vec2 cell = floor(gl_FragCoord.xy / 28.0); float checker = mod(cell.x + cell.y, 2.0); vec3 grid = checker < 0.5 ? vec3(0.01, 0.0, 0.02) : vec3(0.30, 0.02, 0.36); renderedColor = mix(grid, c.rgb, alpha); alpha = 1.0; } else if (glacierBackgroundEnabled > 0.5) { vec2 uv = vec2(gl_FragCoord.x / max(iResolution.x, 1.0), 1.0 - gl_FragCoord.y / max(iResolution.y, 1.0)); vec3 background = texture(glacierBackground, uv).rgb; renderedColor = mix(background, c.rgb, alpha); alpha = 1.0; } } glacierColor = vec4(renderedColor, alpha); }\n";
+    "void main() { vec4 c = vec4(0.0); mainImage(c, gl_FragCoord.xy); float alpha = 1.0; vec3 renderedColor = c.rgb; if (iChromaKey.a > 0.5) { float d = distance(c.rgb, iChromaKey.rgb); float edge = max(iChromaSmooth, 0.0001); alpha = smoothstep(edge, edge + 0.035, d) * clamp(iChromaOpacity, 0.0, 1.0); if (iChromaPreview > 0.5) { vec2 cell = floor(gl_FragCoord.xy / 28.0); float checker = mod(cell.x + cell.y, 2.0); vec3 grid = checker < 0.5 ? vec3(0.01, 0.0, 0.02) : vec3(0.30, 0.02, 0.36); renderedColor = mix(grid, c.rgb, alpha); alpha = 1.0; } else if (glacierBackgroundEnabled > 0.5) { vec2 uv = vec2(gl_FragCoord.x / max(iResolution.x, 1.0), 1.0 - gl_FragCoord.y / max(iResolution.y, 1.0)); vec3 background = texture(glacierBackground, uv).rgb; renderedColor = mix(background, c.rgb, alpha); alpha = 1.0; } } glacierColor = vec4(renderedColor, alpha); }\n";
 
 static char *normalize_shader(const char *source) {
     GString *out = g_string_new(NULL);
@@ -424,9 +428,9 @@ gboolean preview_render(GtkGLArea *area, GdkGLContext *context, App *app) {
     if (!app->preview_ready || !app->program) return TRUE;
     int width = gtk_widget_get_allocated_width(GTK_WIDGET(area));
     int height = gtk_widget_get_allocated_height(GTK_WIDGET(area));
-    float elapsed = (float)(g_get_monotonic_time() - app->started) / 1000000.0f; int frame = (int)(elapsed * 60.0f); float speed = app->speed ? (float)gtk_range_get_value(GTK_RANGE(app->speed)) / 100.0f : 1.0f; gboolean chroma; float key[3], smoothing; app_effect_values(app, &chroma, key, &smoothing); elapsed *= speed;
+    float elapsed = (float)(g_get_monotonic_time() - app->started) / 1000000.0f; int frame = (int)(elapsed * 60.0f); float speed = app->speed ? (float)gtk_range_get_value(GTK_RANGE(app->speed)) / 100.0f : 1.0f; gboolean chroma; float key[3], smoothing, opacity; app_effect_values(app, &chroma, key, &smoothing, &opacity); elapsed *= speed;
     glViewport(0, 0, width, height); glClearColor(0.025f, 0.035f, 0.06f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(app->program); shader_set_uniforms(&app->uniforms, width, height, elapsed, frame); shader_set_effects(&app->uniforms, chroma, key, smoothing); shader_set_preview_background(&app->uniforms, TRUE); shader_set_background(&app->uniforms, 0, 0, 0, FALSE); bind_shader_channels(&app->uniforms, app->channel_textures, app->channel_widths, app->channel_heights, app->channel_types);
+    glUseProgram(app->program); shader_set_uniforms(&app->uniforms, width, height, elapsed, frame); shader_set_effects(&app->uniforms, chroma, key, smoothing, opacity); shader_set_preview_background(&app->uniforms, TRUE); shader_set_background(&app->uniforms, 0, 0, 0, FALSE); bind_shader_channels(&app->uniforms, app->channel_textures, app->channel_widths, app->channel_heights, app->channel_types);
     glBindVertexArray(app->vao); glDrawArrays(GL_TRIANGLES, 0, 3);
     return TRUE;
 }
@@ -437,8 +441,8 @@ gboolean widget_preview_render(GtkGLArea *area, GdkGLContext *context, App *app)
     int height = gtk_widget_get_allocated_height(GTK_WIDGET(area));
     glViewport(0, 0, width, height); glClearColor(0.025f, 0.035f, 0.06f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
     if (!app->widget_preview_ready || !app->widget_program) return TRUE;
-    float elapsed = (float)(g_get_monotonic_time() - app->started) / 1000000.0f; int frame = (int)(elapsed * 60.0f); float speed = app->speed ? (float)gtk_range_get_value(GTK_RANGE(app->speed)) / 100.0f : 1.0f; gboolean chroma; float key[3], smoothing; app_effect_values(app, &chroma, key, &smoothing); elapsed *= speed;
-    glUseProgram(app->widget_program); shader_set_uniforms(&app->widget_uniforms, width, height, elapsed, frame); shader_set_effects(&app->widget_uniforms, chroma, key, smoothing); shader_set_preview_background(&app->widget_uniforms, TRUE); shader_set_background(&app->widget_uniforms, 0, 0, 0, FALSE); bind_shader_channels(&app->widget_uniforms, app->widget_channel_textures, app->widget_channel_widths, app->widget_channel_heights, app->widget_channel_types);
+    float elapsed = (float)(g_get_monotonic_time() - app->started) / 1000000.0f; int frame = (int)(elapsed * 60.0f); float speed = app->speed ? (float)gtk_range_get_value(GTK_RANGE(app->speed)) / 100.0f : 1.0f; gboolean chroma; float key[3], smoothing, opacity; app_effect_values(app, &chroma, key, &smoothing, &opacity); elapsed *= speed;
+    glUseProgram(app->widget_program); shader_set_uniforms(&app->widget_uniforms, width, height, elapsed, frame); shader_set_effects(&app->widget_uniforms, chroma, key, smoothing, opacity); shader_set_preview_background(&app->widget_uniforms, TRUE); shader_set_background(&app->widget_uniforms, 0, 0, 0, FALSE); bind_shader_channels(&app->widget_uniforms, app->widget_channel_textures, app->widget_channel_widths, app->widget_channel_heights, app->widget_channel_types);
     glBindVertexArray(app->widget_vao); glDrawArrays(GL_TRIANGLES, 0, 3);
     return TRUE;
 }
@@ -508,7 +512,7 @@ static gboolean thumb_render(GtkGLArea *area, GdkGLContext *context, ShaderThumb
     (void)context; int width = gtk_widget_get_allocated_width(GTK_WIDGET(area)), height = gtk_widget_get_allocated_height(GTK_WIDGET(area));
     glViewport(0, 0, width, height); glClearColor(0.035f, 0.045f, 0.055f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
     if (!thumb->program) return TRUE;
-    float elapsed = (float)(g_get_monotonic_time() - thumb->started) / 1000000.0f; float key[3] = { 0.0f, 1.0f, 0.0f }; glUseProgram(thumb->program); shader_set_uniforms(&thumb->uniforms, width, height, elapsed, (int)(elapsed * 60)); shader_set_effects(&thumb->uniforms, FALSE, key, 0.06f); shader_set_preview_background(&thumb->uniforms, FALSE); shader_set_background(&thumb->uniforms, 0, 0, 0, FALSE); bind_shader_channels(&thumb->uniforms, thumb->channel_textures, thumb->channel_widths, thumb->channel_heights, thumb->channel_types); glBindVertexArray(thumb->vao); glDrawArrays(GL_TRIANGLES, 0, 3); return TRUE;
+    float elapsed = (float)(g_get_monotonic_time() - thumb->started) / 1000000.0f; float key[3] = { 0.0f, 1.0f, 0.0f }; glUseProgram(thumb->program); shader_set_uniforms(&thumb->uniforms, width, height, elapsed, (int)(elapsed * 60)); shader_set_effects(&thumb->uniforms, FALSE, key, 0.06f, 1.0f); shader_set_preview_background(&thumb->uniforms, FALSE); shader_set_background(&thumb->uniforms, 0, 0, 0, FALSE); bind_shader_channels(&thumb->uniforms, thumb->channel_textures, thumb->channel_widths, thumb->channel_heights, thumb->channel_types); glBindVertexArray(thumb->vao); glDrawArrays(GL_TRIANGLES, 0, 3); return TRUE;
 }
 
 static gboolean thumb_tick(GtkGLArea *area) { if (gtk_widget_get_realized(GTK_WIDGET(area))) gtk_gl_area_queue_render(area); return G_SOURCE_CONTINUE; }

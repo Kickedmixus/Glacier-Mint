@@ -35,8 +35,8 @@ void stop_wallpaper(void) {
 }
 
 /* active.ini names the wallpaper that `glacier-mint --restore` starts at login or from the wallpaper switcher. */
-static void save_active_wallpaper(const char *path, int fps, gboolean vsync, const char *title, int speed, gboolean chroma, const float key[3], float smoothing) {
-    GKeyFile *file = g_key_file_new(); g_key_file_set_string(file, "wallpaper", "path", path); g_key_file_set_integer(file, "wallpaper", "fps", fps); g_key_file_set_boolean(file, "wallpaper", "vsync", vsync); g_key_file_set_string(file, "wallpaper", "title", title ? title : ""); g_key_file_set_integer(file, "wallpaper", "speed_percent", speed); g_key_file_set_boolean(file, "wallpaper", "chroma_enabled", chroma); g_key_file_set_double(file, "wallpaper", "chroma_red", key[0]); g_key_file_set_double(file, "wallpaper", "chroma_green", key[1]); g_key_file_set_double(file, "wallpaper", "chroma_blue", key[2]); g_key_file_set_double(file, "wallpaper", "chroma_smoothing", smoothing);
+static void save_active_wallpaper(const char *path, int fps, gboolean vsync, const char *title, int speed, gboolean chroma, const float key[3], float smoothing, int opacity) {
+    GKeyFile *file = g_key_file_new(); g_key_file_set_string(file, "wallpaper", "path", path); g_key_file_set_integer(file, "wallpaper", "fps", fps); g_key_file_set_boolean(file, "wallpaper", "vsync", vsync); g_key_file_set_string(file, "wallpaper", "title", title ? title : ""); g_key_file_set_integer(file, "wallpaper", "speed_percent", speed); g_key_file_set_boolean(file, "wallpaper", "chroma_enabled", chroma); g_key_file_set_double(file, "wallpaper", "chroma_red", key[0]); g_key_file_set_double(file, "wallpaper", "chroma_green", key[1]); g_key_file_set_double(file, "wallpaper", "chroma_blue", key[2]); g_key_file_set_double(file, "wallpaper", "chroma_smoothing", smoothing); g_key_file_set_integer(file, "wallpaper", "chroma_opacity", opacity);
     char *data = g_key_file_to_data(file, NULL, NULL), *active = data_path("active.ini"); g_file_set_contents(active, data, -1, NULL); g_free(active); g_free(data); g_key_file_free(file);
 }
 
@@ -55,32 +55,33 @@ static void load_active_effects(App *app) {
     if (app->speed) gtk_range_set_value(GTK_RANGE(app->speed), CLAMP(key_file_int(file, "speed_percent", 100), 0, 200));
     if (app->chroma_enable) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->chroma_enable), key_file_bool(file, "chroma_enabled", FALSE));
     if (app->chroma_smoothing) gtk_range_set_value(GTK_RANGE(app->chroma_smoothing), CLAMP(key_file_double(file, "chroma_smoothing", 0.06), 0.005, 0.30));
+    if (app->chroma_opacity) gtk_range_set_value(GTK_RANGE(app->chroma_opacity), CLAMP(key_file_int(file, "chroma_opacity", 100), 0, 100));
     if (app->chroma_color) { GdkRGBA color = { key_file_double(file, "chroma_red", 0.0), key_file_double(file, "chroma_green", 1.0), key_file_double(file, "chroma_blue", 0.0), 1.0 }; gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(app->chroma_color), &color); }
     g_key_file_free(file);
 }
 
 int restore_wallpaper(void) {
-    GKeyFile *file = load_key_file("active.ini"); char *path = file ? g_key_file_get_string(file, "wallpaper", "path", NULL) : NULL; int fps = key_file_int(file, "fps", 30), speed = CLAMP(key_file_int(file, "speed_percent", 100), 0, 200); gboolean vsync = key_file_bool(file, "vsync", TRUE), chroma = key_file_bool(file, "chroma_enabled", FALSE); float key[3] = { (float)key_file_double(file, "chroma_red", 0.0), (float)key_file_double(file, "chroma_green", 1.0), (float)key_file_double(file, "chroma_blue", 0.0) }, smoothing = CLAMP((float)key_file_double(file, "chroma_smoothing", 0.06), 0.005f, 0.30f); if (file) g_key_file_free(file);
+    GKeyFile *file = load_key_file("active.ini"); char *path = file ? g_key_file_get_string(file, "wallpaper", "path", NULL) : NULL; int fps = key_file_int(file, "fps", 30), speed = CLAMP(key_file_int(file, "speed_percent", 100), 0, 200), opacity = CLAMP(key_file_int(file, "chroma_opacity", 100), 0, 100); gboolean vsync = key_file_bool(file, "vsync", TRUE), chroma = key_file_bool(file, "chroma_enabled", FALSE); float key[3] = { (float)key_file_double(file, "chroma_red", 0.0), (float)key_file_double(file, "chroma_green", 1.0), (float)key_file_double(file, "chroma_blue", 0.0) }, smoothing = CLAMP((float)key_file_double(file, "chroma_smoothing", 0.06), 0.005f, 0.30f); if (file) g_key_file_free(file);
     if (!path || !g_file_test(path, G_FILE_TEST_IS_REGULAR)) { fprintf(stderr, "glacier-mint: no wallpaper to restore; choose one in Glacier Mint and click Set as current wallpaper\n"); g_free(path); return 1; }
     stop_wallpaper(); char *pid_path = data_path("wallpaper.pid"), pid[32]; g_snprintf(pid, sizeof(pid), "%d", (int)getpid()); g_file_set_contents(pid_path, pid, -1, NULL); g_free(pid_path);
-    int status = wallpaper_main(path, CLAMP(fps, 1, 240), vsync, speed, chroma, key, smoothing); g_free(path); return status;
+    int status = wallpaper_main(path, CLAMP(fps, 1, 240), vsync, speed, chroma, key, smoothing, opacity); g_free(path); return status;
 }
 
 static int chosen_fps(App *app) { const char *id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(app->fps)); return id ? CLAMP(atoi(id), 1, 240) : 30; }
 static int chosen_speed(App *app) { return app->speed ? CLAMP((int)lround(gtk_range_get_value(GTK_RANGE(app->speed))), 0, 200) : 100; }
-static void chosen_effects(App *app, gboolean *chroma, float key[3], float *smoothing) {
+static void chosen_effects(App *app, gboolean *chroma, float key[3], float *smoothing, int *opacity) {
     GdkRGBA color = { 0.0, 1.0, 0.0, 1.0 }; if (app->chroma_color) gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(app->chroma_color), &color);
-    *chroma = app->chroma_enable && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->chroma_enable)); key[0] = (float)color.red; key[1] = (float)color.green; key[2] = (float)color.blue; *smoothing = app->chroma_smoothing ? CLAMP((float)gtk_range_get_value(GTK_RANGE(app->chroma_smoothing)), 0.005f, 0.30f) : 0.06f;
+    *chroma = app->chroma_enable && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->chroma_enable)); key[0] = (float)color.red; key[1] = (float)color.green; key[2] = (float)color.blue; *smoothing = app->chroma_smoothing ? CLAMP((float)gtk_range_get_value(GTK_RANGE(app->chroma_smoothing)), 0.005f, 0.30f) : 0.06f; *opacity = app->chroma_opacity ? CLAMP((int)lround(gtk_range_get_value(GTK_RANGE(app->chroma_opacity))), 0, 100) : 100;
 }
 
 /* Starts (or restarts) the desktop wallpaper with the FPS limit and V-sync chosen in Settings. */
 static gboolean launch_wallpaper(App *app, const char *path, const char *title) {
-    int fps = chosen_fps(app), speed = chosen_speed(app); gboolean vsync = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->vsync)), chroma; float key[3], smoothing; char fps_text[16], speed_text[16], chroma_text[8], red_text[24], green_text[24], blue_text[24], smooth_text[24], *exe = self_executable(); GError *error = NULL; GPid pid = 0; chosen_effects(app, &chroma, key, &smoothing); g_snprintf(fps_text, sizeof(fps_text), "%d", fps); g_snprintf(speed_text, sizeof(speed_text), "%d", speed); g_snprintf(chroma_text, sizeof(chroma_text), "%d", chroma ? 1 : 0); g_ascii_dtostr(red_text, sizeof(red_text), key[0]); g_ascii_dtostr(green_text, sizeof(green_text), key[1]); g_ascii_dtostr(blue_text, sizeof(blue_text), key[2]); g_ascii_dtostr(smooth_text, sizeof(smooth_text), smoothing);
+    int fps = chosen_fps(app), speed = chosen_speed(app), opacity; gboolean vsync = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->vsync)), chroma; float key[3], smoothing; char fps_text[16], speed_text[16], opacity_text[16], chroma_text[8], red_text[24], green_text[24], blue_text[24], smooth_text[24], *exe = self_executable(); GError *error = NULL; GPid pid = 0; chosen_effects(app, &chroma, key, &smoothing, &opacity); g_snprintf(fps_text, sizeof(fps_text), "%d", fps); g_snprintf(speed_text, sizeof(speed_text), "%d", speed); g_snprintf(opacity_text, sizeof(opacity_text), "%d", opacity); g_snprintf(chroma_text, sizeof(chroma_text), "%d", chroma ? 1 : 0); g_ascii_dtostr(red_text, sizeof(red_text), key[0]); g_ascii_dtostr(green_text, sizeof(green_text), key[1]); g_ascii_dtostr(blue_text, sizeof(blue_text), key[2]); g_ascii_dtostr(smooth_text, sizeof(smooth_text), smoothing);
     stop_wallpaper();
-    char *argv[] = { exe, "--wallpaper", (char *)path, "--fps", fps_text, "--vsync", vsync ? "1" : "0", "--speed", speed_text, "--chroma", chroma_text, "--key-r", red_text, "--key-g", green_text, "--key-b", blue_text, "--smooth", smooth_text, NULL };
+    char *argv[] = { exe, "--wallpaper", (char *)path, "--fps", fps_text, "--vsync", vsync ? "1" : "0", "--speed", speed_text, "--opacity", opacity_text, "--chroma", chroma_text, "--key-r", red_text, "--key-g", green_text, "--key-b", blue_text, "--smooth", smooth_text, NULL };
     gboolean started = g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, &pid, &error);
     if (!started) { set_status(app, error->message); g_error_free(error); }
-    else { char *pid_path = data_path("wallpaper.pid"), buf[32]; snprintf(buf, sizeof(buf), "%d", (int)pid); g_file_set_contents(pid_path, buf, -1, NULL); g_free(pid_path); save_active_wallpaper(path, fps, vsync, title, speed, chroma, key, smoothing); }
+    else { char *pid_path = data_path("wallpaper.pid"), buf[32]; snprintf(buf, sizeof(buf), "%d", (int)pid); g_file_set_contents(pid_path, buf, -1, NULL); g_free(pid_path); save_active_wallpaper(path, fps, vsync, title, speed, chroma, key, smoothing, opacity); }
     g_free(exe); return started;
 }
 

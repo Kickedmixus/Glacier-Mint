@@ -6,9 +6,9 @@
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--restore")) return restore_wallpaper();
     if (argc >= 3 && !strcmp(argv[1], "--wallpaper")) {
-        int fps = 30, speed = 100; gboolean vsync = TRUE, chroma = FALSE; float key[3] = { 0.0f, 1.0f, 0.0f }, smoothing = 0.06f;
-        for (int i = 3; i + 1 < argc; i++) { if (!strcmp(argv[i], "--fps")) fps = atoi(argv[i + 1]); else if (!strcmp(argv[i], "--vsync")) vsync = atoi(argv[i + 1]) != 0; else if (!strcmp(argv[i], "--speed")) speed = atoi(argv[i + 1]); else if (!strcmp(argv[i], "--chroma")) chroma = atoi(argv[i + 1]) != 0; else if (!strcmp(argv[i], "--key-r")) key[0] = (float)g_ascii_strtod(argv[i + 1], NULL); else if (!strcmp(argv[i], "--key-g")) key[1] = (float)g_ascii_strtod(argv[i + 1], NULL); else if (!strcmp(argv[i], "--key-b")) key[2] = (float)g_ascii_strtod(argv[i + 1], NULL); else if (!strcmp(argv[i], "--smooth")) smoothing = (float)g_ascii_strtod(argv[i + 1], NULL); }
-        return wallpaper_main(argv[2], CLAMP(fps, 1, 240), vsync, CLAMP(speed, 0, 200), chroma, key, CLAMP(smoothing, 0.005f, 0.30f));
+        int fps = 30, speed = 100, opacity = 100; gboolean vsync = TRUE, chroma = FALSE; float key[3] = { 0.0f, 1.0f, 0.0f }, smoothing = 0.06f;
+        for (int i = 3; i + 1 < argc; i++) { if (!strcmp(argv[i], "--fps")) fps = atoi(argv[i + 1]); else if (!strcmp(argv[i], "--vsync")) vsync = atoi(argv[i + 1]) != 0; else if (!strcmp(argv[i], "--speed")) speed = atoi(argv[i + 1]); else if (!strcmp(argv[i], "--chroma")) chroma = atoi(argv[i + 1]) != 0; else if (!strcmp(argv[i], "--key-r")) key[0] = (float)g_ascii_strtod(argv[i + 1], NULL); else if (!strcmp(argv[i], "--key-g")) key[1] = (float)g_ascii_strtod(argv[i + 1], NULL); else if (!strcmp(argv[i], "--key-b")) key[2] = (float)g_ascii_strtod(argv[i + 1], NULL); else if (!strcmp(argv[i], "--smooth")) smoothing = (float)g_ascii_strtod(argv[i + 1], NULL); else if (!strcmp(argv[i], "--opacity")) opacity = atoi(argv[i + 1]); }
+        return wallpaper_main(argv[2], CLAMP(fps, 1, 240), vsync, CLAMP(speed, 0, 200), chroma, key, CLAMP(smoothing, 0.005f, 0.30f), CLAMP(opacity, 0, 100));
     }
 
     gtk_init(&argc, &argv);

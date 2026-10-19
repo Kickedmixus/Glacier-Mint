@@ -52,15 +52,22 @@ static DeskWidget *desk_of(GtkWidget *box) { return box ? g_object_get_data(G_OB
 
 static gboolean is_live_widget(App *app, GtkWidget *box) { guint index; return box && app->wallpaper_widgets && g_ptr_array_find(app->wallpaper_widgets, box, &index); }
 
-/* The canvas shows the whole screen shrunk down, so widgets are drawn at canvas size / screen size. */
-static double preview_scale(App *app, gboolean vertical) {
-    int canvas = vertical ? gtk_widget_get_allocated_height(app->widget_canvas) : gtk_widget_get_allocated_width(app->widget_canvas), screen = vertical ? app->widget_screen_height : app->widget_screen_width;
-    return canvas > 1 ? (double)canvas / MAX(1, screen) : 1.0;
+/* One logical screen rectangle is shared by the editor and wallpaper. */
+static void preview_rect(App *app, int *left, int *top, int *width, int *height, double *scale) {
+    int canvas_width = gtk_widget_get_allocated_width(app->widget_canvas), canvas_height = gtk_widget_get_allocated_height(app->widget_canvas);
+    double sx = (double)canvas_width / MAX(1, app->widget_screen_width), sy = (double)canvas_height / MAX(1, app->widget_screen_height), value = MIN(sx, sy);
+    if (value <= 0.0) value = 1.0;
+    int screen_width = MAX(1, (int)round(app->widget_screen_width * value)), screen_height = MAX(1, (int)round(app->widget_screen_height * value));
+    if (left) *left = (canvas_width - screen_width) / 2;
+    if (top) *top = (canvas_height - screen_height) / 2;
+    if (width) *width = screen_width;
+    if (height) *height = screen_height;
+    if (scale) *scale = value;
 }
 
 static gboolean draw_wallpaper_widget(GtkWidget *area, cairo_t *cr, GtkWidget *box) {
     (void)area; App *app = g_object_get_data(G_OBJECT(box), "widget-app"); DeskWidget *widget = desk_of(box); if (!app || !widget) return FALSE;
-    cairo_save(cr); cairo_scale(cr, preview_scale(app, FALSE), preview_scale(app, TRUE)); desk_widget_draw(cr, widget, &app->widget_snapshot); cairo_restore(cr);
+    int left, top; double scale; preview_rect(app, &left, &top, NULL, NULL, &scale); cairo_save(cr); cairo_translate(cr, left, top); cairo_scale(cr, scale, scale); desk_widget_draw(cr, widget, &app->widget_snapshot); cairo_restore(cr);
     if (app->selected_widget == box) {
         double width = gtk_widget_get_allocated_width(area), height = gtk_widget_get_allocated_height(area);
         cairo_set_source_rgba(cr, 1.0, 0.85, 0.15, 0.95); cairo_set_line_width(cr, 2.0);
@@ -72,8 +79,8 @@ static gboolean draw_wallpaper_widget(GtkWidget *area, cairo_t *cr, GtkWidget *b
 static void set_widget_normalized_position(GtkWidget *box, App *app, double x, double y);
 
 static void refresh_widget_size(App *app, GtkWidget *box) {
-    GtkWidget *area = g_object_get_data(G_OBJECT(box), "widget-label"); int width, height; desk_widget_measure(desk_of(box), &app->widget_snapshot, &width, &height);
-    gtk_widget_set_size_request(area, MAX(1, (int)ceil(width * preview_scale(app, FALSE))), MAX(1, (int)ceil(height * preview_scale(app, TRUE))));
+    GtkWidget *area = g_object_get_data(G_OBJECT(box), "widget-label"); int width, height; double scale; desk_widget_measure(desk_of(box), &app->widget_snapshot, &width, &height); preview_rect(app, NULL, NULL, NULL, NULL, &scale);
+    gtk_widget_set_size_request(area, MAX(1, (int)ceil(width * scale)), MAX(1, (int)ceil(height * scale)));
     DeskWidget *widget = desk_of(box); set_widget_normalized_position(box, app, widget->x, widget->y); gtk_widget_queue_draw(area);
 }
 
@@ -112,31 +119,31 @@ static void set_widget_normalized_position(GtkWidget *box, App *app, double x, d
     desk_widget_measure(widget, &app->widget_snapshot, &widget_width, &widget_height);
     desk_widget_clamp_position(app->widget_screen_width, app->widget_screen_height, widget_width, widget_height, &x, &y);
     widget->x = x; widget->y = y;
-    int width = gtk_widget_get_allocated_width(app->widget_canvas), height = gtk_widget_get_allocated_height(app->widget_canvas);
-    if (width > 0) gtk_widget_set_margin_start(box, (int)round(widget->x * width));
-    if (height > 0) gtk_widget_set_margin_top(box, (int)round(widget->y * height));
+    int left, top, screen_width, screen_height; double scale; preview_rect(app, &left, &top, &screen_width, &screen_height, &scale);
+    if (screen_width > 0) gtk_widget_set_margin_start(box, left + (int)round(widget->x * screen_width));
+    if (screen_height > 0) gtk_widget_set_margin_top(box, top + (int)round(widget->y * screen_height));
 }
 
 static void snap_widget_position(App *app, GtkWidget *widget, int left, int top) {
-    int canvas_width = gtk_widget_get_allocated_width(app->widget_canvas), canvas_height = gtk_widget_get_allocated_height(app->widget_canvas);
-    double scale_x = (double)canvas_width / MAX(1, app->widget_screen_width), scale_y = (double)canvas_height / MAX(1, app->widget_screen_height);
-    double step_x = 64.0 * scale_x, step_y = 64.0 * scale_y; if (step_x < 4.0) step_x = 4.0; if (step_y < 4.0) step_y = 4.0;
-    double center_x = canvas_width / 2.0, center_y = canvas_height / 2.0;
+    int canvas_left, canvas_top, canvas_width, canvas_height; double scale; preview_rect(app, &canvas_left, &canvas_top, &canvas_width, &canvas_height, &scale);
+    double step_x = 64.0 * scale, step_y = 64.0 * scale; if (step_x < 4.0) step_x = 4.0; if (step_y < 4.0) step_y = 4.0;
+    double center_x = canvas_left + canvas_width / 2.0, center_y = canvas_top + canvas_height / 2.0;
     left = (int)round(center_x + round((left + gtk_widget_get_allocated_width(widget) / 2.0 - center_x) / step_x) * step_x - gtk_widget_get_allocated_width(widget) / 2.0);
     top = (int)round(center_y + round((top + gtk_widget_get_allocated_height(widget) / 2.0 - center_y) / step_y) * step_y - gtk_widget_get_allocated_height(widget) / 2.0);
-    left = CLAMP(left, 0, MAX(0, canvas_width - gtk_widget_get_allocated_width(widget))); top = CLAMP(top, 0, MAX(0, canvas_height - gtk_widget_get_allocated_height(widget)));
-    set_widget_normalized_position(widget, app, (double)left / MAX(1, canvas_width), (double)top / MAX(1, canvas_height));
+    left = CLAMP(left, canvas_left, MAX(canvas_left, canvas_left + canvas_width - gtk_widget_get_allocated_width(widget))); top = CLAMP(top, canvas_top, MAX(canvas_top, canvas_top + canvas_height - gtk_widget_get_allocated_height(widget)));
+    set_widget_normalized_position(widget, app, (double)(left - canvas_left) / MAX(1.0, canvas_width), (double)(top - canvas_top) / MAX(1.0, canvas_height));
 }
 
 static gboolean draw_widget_grid(GtkWidget *grid, cairo_t *cr, App *app) {
     double width = gtk_widget_get_allocated_width(grid), height = gtk_widget_get_allocated_height(grid); if (width <= 0 || height <= 0) return FALSE;
-    double step_x = 64.0 * width / MAX(1, app->widget_screen_width), step_y = 64.0 * height / MAX(1, app->widget_screen_height); if (step_x < 4.0) step_x = 4.0; if (step_y < 4.0) step_y = 4.0;
+    int left, top, screen_width, screen_height; double scale; preview_rect(app, &left, &top, &screen_width, &screen_height, &scale);
+    double step_x = 64.0 * scale, step_y = 64.0 * scale; if (step_x < 4.0) step_x = 4.0; if (step_y < 4.0) step_y = 4.0;
     cairo_set_line_width(cr, 1.0); cairo_set_source_rgba(cr, 0.66, 0.88, 0.94, 0.18);
-    for (double x = width / 2.0; x >= 0; x -= step_x) { cairo_move_to(cr, x, 0); cairo_line_to(cr, x, height); }
-    for (double x = width / 2.0 + step_x; x <= width; x += step_x) { cairo_move_to(cr, x, 0); cairo_line_to(cr, x, height); }
-    for (double y = height / 2.0; y >= 0; y -= step_y) { cairo_move_to(cr, 0, y); cairo_line_to(cr, width, y); }
-    for (double y = height / 2.0 + step_y; y <= height; y += step_y) { cairo_move_to(cr, 0, y); cairo_line_to(cr, width, y); }
-    cairo_stroke(cr); cairo_set_source_rgba(cr, 0.66, 0.88, 0.94, 0.55); cairo_move_to(cr, width / 2.0, 0); cairo_line_to(cr, width / 2.0, height); cairo_move_to(cr, 0, height / 2.0); cairo_line_to(cr, width, height / 2.0); cairo_stroke(cr); return FALSE;
+    for (double x = left + screen_width / 2.0; x >= left; x -= step_x) { cairo_move_to(cr, x, top); cairo_line_to(cr, x, top + screen_height); }
+    for (double x = left + screen_width / 2.0 + step_x; x <= left + screen_width; x += step_x) { cairo_move_to(cr, x, top); cairo_line_to(cr, x, top + screen_height); }
+    for (double y = top + screen_height / 2.0; y >= top; y -= step_y) { cairo_move_to(cr, left, y); cairo_line_to(cr, left + screen_width, y); }
+    for (double y = top + screen_height / 2.0 + step_y; y <= top + screen_height; y += step_y) { cairo_move_to(cr, left, y); cairo_line_to(cr, left + screen_width, y); }
+    cairo_stroke(cr); cairo_set_source_rgba(cr, 0.66, 0.88, 0.94, 0.55); cairo_move_to(cr, left + screen_width / 2.0, top); cairo_line_to(cr, left + screen_width / 2.0, top + screen_height); cairo_move_to(cr, left, top + screen_height / 2.0); cairo_line_to(cr, left + screen_width, top + screen_height / 2.0); cairo_stroke(cr); return FALSE;
 }
 
 static gboolean reposition_wallpaper_widgets(gpointer data) {
@@ -361,9 +368,10 @@ static gboolean wallpaper_widget_motion(GtkWidget *widget, GdkEventMotion *event
     if (!GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "dragging"))) return FALSE;
     int left = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "drag-left")) + (int)event->x_root - GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "drag-x"));
     int top = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "drag-top")) + (int)event->y_root - GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "drag-y"));
-    int max_left = MAX(0, gtk_widget_get_allocated_width(app->widget_canvas) - gtk_widget_get_allocated_width(widget));
-    int max_top = MAX(0, gtk_widget_get_allocated_height(app->widget_canvas) - gtk_widget_get_allocated_height(widget));
-    left = CLAMP(left, 0, max_left); top = CLAMP(top, 0, max_top); snap_widget_position(app, widget, left, top); save_wallpaper_widgets(app); return TRUE;
+    int canvas_left, canvas_top, canvas_width, canvas_height; preview_rect(app, &canvas_left, &canvas_top, &canvas_width, &canvas_height, NULL);
+    int max_left = MAX(canvas_left, canvas_left + canvas_width - gtk_widget_get_allocated_width(widget));
+    int max_top = MAX(canvas_top, canvas_top + canvas_height - gtk_widget_get_allocated_height(widget));
+    left = CLAMP(left, canvas_left, max_left); top = CLAMP(top, canvas_top, max_top); snap_widget_position(app, widget, left, top); save_wallpaper_widgets(app); return TRUE;
 }
 
 static gboolean wallpaper_widget_release(GtkWidget *widget, GdkEventButton *event, App *app) {
@@ -425,8 +433,9 @@ GtkWidget *build_ui(App *app) {
     app->chroma_enable = gtk_check_button_new_with_label("Reveal background"); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_enable, FALSE, FALSE, 0);
     GdkRGBA chroma_default = { 0.0, 1.0, 0.0, 1.0 }; app->chroma_color = gtk_color_button_new_with_rgba(&chroma_default); gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(app->chroma_color), FALSE); gtk_widget_set_tooltip_text(app->chroma_color, "Key color; click a pixel in the selected preview to pick it"); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_color, FALSE, FALSE, 0);
     GtkWidget *pick_hint = gtk_label_new("Click preview to pick"); gtk_style_context_add_class(gtk_widget_get_style_context(pick_hint), "muted"); gtk_box_pack_start(GTK_BOX(chroma_row), pick_hint, FALSE, FALSE, 0);
-    GtkWidget *smooth_label = gtk_label_new("Smoothing"); gtk_box_pack_start(GTK_BOX(chroma_row), smooth_label, FALSE, FALSE, 4); app->chroma_smoothing = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.005, 0.30, 0.005); gtk_range_set_value(GTK_RANGE(app->chroma_smoothing), 0.06); gtk_scale_set_digits(GTK_SCALE(app->chroma_smoothing), 3); gtk_widget_set_size_request(app->chroma_smoothing, 150, -1); gtk_scale_set_draw_value(GTK_SCALE(app->chroma_smoothing), TRUE); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_smoothing, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(local_page), chroma_row, FALSE, FALSE, 6);
-    g_signal_connect(app->chroma_enable, "toggled", G_CALLBACK(shader_display_option_changed), app); g_signal_connect(app->chroma_color, "color-set", G_CALLBACK(shader_display_option_changed), app); g_signal_connect(app->chroma_smoothing, "value-changed", G_CALLBACK(shader_display_option_changed), app);
+    GtkWidget *smooth_label = gtk_label_new("Smoothing"); gtk_box_pack_start(GTK_BOX(chroma_row), smooth_label, FALSE, FALSE, 4); app->chroma_smoothing = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.005, 0.30, 0.005); gtk_range_set_value(GTK_RANGE(app->chroma_smoothing), 0.06); gtk_scale_set_digits(GTK_SCALE(app->chroma_smoothing), 3); gtk_widget_set_size_request(app->chroma_smoothing, 150, -1); gtk_scale_set_draw_value(GTK_SCALE(app->chroma_smoothing), TRUE); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_smoothing, FALSE, FALSE, 0);
+    GtkWidget *opacity_label = gtk_label_new("Opacity"); gtk_box_pack_start(GTK_BOX(chroma_row), opacity_label, FALSE, FALSE, 8); app->chroma_opacity = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.0, 100.0, 1.0); gtk_range_set_value(GTK_RANGE(app->chroma_opacity), 100.0); gtk_scale_set_digits(GTK_SCALE(app->chroma_opacity), 0); gtk_widget_set_size_request(app->chroma_opacity, 130, -1); gtk_scale_set_draw_value(GTK_SCALE(app->chroma_opacity), TRUE); gtk_scale_set_value_pos(GTK_SCALE(app->chroma_opacity), GTK_POS_RIGHT); gtk_widget_set_tooltip_text(app->chroma_opacity, "Shader opacity percentage"); gtk_box_pack_start(GTK_BOX(chroma_row), app->chroma_opacity, FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(local_page), chroma_row, FALSE, FALSE, 6);
+    g_signal_connect(app->chroma_enable, "toggled", G_CALLBACK(shader_display_option_changed), app); g_signal_connect(app->chroma_color, "color-set", G_CALLBACK(shader_display_option_changed), app); g_signal_connect(app->chroma_smoothing, "value-changed", G_CALLBACK(shader_display_option_changed), app); g_signal_connect(app->chroma_opacity, "value-changed", G_CALLBACK(shader_display_option_changed), app);
     app->status = gtk_label_new("Choose a shader to begin"); gtk_widget_set_halign(app->status, GTK_ALIGN_START); gtk_style_context_add_class(gtk_widget_get_style_context(app->status), "muted"); gtk_box_pack_start(GTK_BOX(local_page), app->status, FALSE, FALSE, 0);
     GtkWidget *speed_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8); GtkWidget *speed_label = gtk_label_new("Shader speed"); gtk_widget_set_halign(speed_label, GTK_ALIGN_START); gtk_box_pack_start(GTK_BOX(speed_row), speed_label, FALSE, FALSE, 0); app->speed = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.0, 200.0, 1.0); gtk_range_set_value(GTK_RANGE(app->speed), 100.0); gtk_scale_set_digits(GTK_SCALE(app->speed), 0); gtk_scale_set_draw_value(GTK_SCALE(app->speed), TRUE); gtk_scale_set_value_pos(GTK_SCALE(app->speed), GTK_POS_RIGHT); gtk_widget_set_hexpand(app->speed, TRUE); gtk_widget_set_tooltip_text(app->speed, "Animation speed percentage; 100% is normal"); gtk_box_pack_start(GTK_BOX(speed_row), app->speed, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(local_page), speed_row, FALSE, FALSE, 0); g_signal_connect(app->speed, "value-changed", G_CALLBACK(shader_display_option_changed), app); gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), local_page, gtk_label_new("Wallpapers"));
 
