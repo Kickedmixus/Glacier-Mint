@@ -6,7 +6,9 @@ A small C/GTK shader wallpaper manager for Linux Mint Cinnamon on X11. It previe
 
 The implementation is split by responsibility: `shader.c` handles GLSL and previews, `storage.c` handles saved wallpapers and assets, `network.c` handles Shadertoy API work, `browser.c` handles WebKit integration, `ui.c` builds the GTK interface, `actions.c` contains UI actions, `wallpaper.c` owns the X11 desktop backend, `widgets.c` holds the desktop widget model, settings file and drawing code shared by the editor and the wallpaper, `feeds.c` collects the live data widgets show, and `beat.c` tracks the music's tempo and beat for music-reactive shaders. Shared types and interfaces live in `app.h`; `main.c` only initializes the app and dispatches wallpaper mode.
 
-The UI has four tabs: local wallpapers in a scrollable grid, a Widgets editor with draggable desktop widgets, an embedded Shadertoy browser with an injected import button plus paste-code fallback, and settings. The last loaded shader is restored on startup.
+The UI has six tabs: Window Styling, local wallpapers in a scrollable grid, a Widgets editor with draggable desktop widgets, an embedded Shadertoy browser with an injected import button plus paste-code fallback, GNOME Extensions, and settings. The last loaded shader is restored on startup.
+
+Window Styling previews a sample window and saves border width, corner radius, color, opacity, and enabled state to `~/.local/share/glacier-mint/window-styling.ini`. The Extensions tab installs `Glacier Mint Window Styling` for GNOME Shell and Cinnamon; enable it in the desktop's extension manager and it reads the same file, so changes made in Glacier Mint are applied to real windows.
 
 ## Widgets
 

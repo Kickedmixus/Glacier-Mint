@@ -51,6 +51,7 @@ static char *constant_source_with_values(App *app) {
 }
 
 gboolean update_shader_source(App *app, const char *source) {
+    if (!app->preview || !gtk_widget_get_realized(app->preview)) return FALSE;
     gtk_gl_area_make_current(GTK_GL_AREA(app->preview)); if (gtk_gl_area_get_error(GTK_GL_AREA(app->preview))) return FALSE;
     char *error = NULL; GLuint program = make_program_for_shader(source, app->shader_path, &error); if (!program) { char *message = g_strdup_printf("Shader error: %s", error ? error : "unknown"); set_status(app, message); g_free(message); g_free(error); return FALSE; }
     if (app->shader_path && g_file_test(app->shader_path, G_FILE_TEST_IS_REGULAR)) { GError *write_error = NULL; if (!g_file_set_contents(app->shader_path, source, -1, &write_error)) { set_status(app, write_error->message); g_error_free(write_error); glDeleteProgram(program); return FALSE; } }
@@ -381,6 +382,11 @@ void preview_realize(GtkGLArea *area, App *app) {
     glGenVertexArrays(1, &app->vao); glBindVertexArray(app->vao);
     gtk_widget_add_events(GTK_WIDGET(area), GDK_BUTTON_PRESS_MASK); g_signal_connect(area, "button-press-event", G_CALLBACK(preview_pick_color), app);
     app->preview_ready = TRUE;
+    if (app->pending_preview_source) {
+        char *source = app->pending_preview_source, *title = app->pending_preview_title, *id = app->pending_preview_id;
+        app->pending_preview_source = NULL; app->pending_preview_title = NULL; app->pending_preview_id = NULL;
+        load_preview(app, source, title, id); g_free(source); g_free(title); g_free(id);
+    }
 }
 
 static void load_widget_program(App *app) {
@@ -455,6 +461,11 @@ gboolean tick_preview(App *app) {
 
 gboolean load_preview(App *app, const char *source, const char *title, const char *id) {
     if (!source) return FALSE;
+    if (!app->preview || !gtk_widget_get_realized(app->preview)) {
+        g_free(app->pending_preview_source); g_free(app->pending_preview_title); g_free(app->pending_preview_id);
+        app->pending_preview_source = g_strdup(source); app->pending_preview_title = g_strdup(title ? title : "Untitled shader"); app->pending_preview_id = g_strdup(id ? id : "");
+        return TRUE;
+    }
     gtk_gl_area_make_current(GTK_GL_AREA(app->preview));
     if (gtk_gl_area_get_error(GTK_GL_AREA(app->preview))) return FALSE;
     char *error = NULL; GLuint program = make_program_for_shader(source, app->shader_path, &error);

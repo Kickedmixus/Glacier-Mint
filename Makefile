@@ -1,7 +1,8 @@
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Wpedantic
+CFLAGS += -Wno-overlength-strings
 PKGS = gtk+-3.0 epoxy json-glib-1.0 libcurl
-SOURCES = src/main.c src/shader.c src/storage.c src/network.c src/actions.c src/browser.c src/ui.c src/wallpaper.c src/widgets.c src/widget_model.c src/widget_geometry.c src/widget_storage.c src/feeds.c src/beat.c
+SOURCES = src/main.c src/shader.c src/storage.c src/network.c src/actions.c src/browser.c src/ui.c src/window_styling.c src/wallpaper.c src/widgets.c src/widget_model.c src/widget_geometry.c src/widget_storage.c src/feeds.c src/beat.c
 WEBKIT_PKG := $(shell if pkg-config --silence-errors --exists webkit2gtk-4.1; then echo webkit2gtk-4.1; elif pkg-config --silence-errors --exists webkit2gtk-4.0; then echo webkit2gtk-4.0; fi)
 
 ifneq ($(WEBKIT_PKG),)

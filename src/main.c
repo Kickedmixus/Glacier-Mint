@@ -4,6 +4,7 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--install-window-extension")) return install_window_extension_files();
     if (argc >= 2 && !strcmp(argv[1], "--restore")) return restore_wallpaper();
     if (argc >= 3 && !strcmp(argv[1], "--wallpaper")) {
         int fps = 30, speed = 100, opacity = 100; gboolean vsync = TRUE, chroma = FALSE; float key[3] = { 0.0f, 1.0f, 0.0f }, smoothing = 0.06f;
@@ -35,7 +36,7 @@ int main(int argc, char **argv) {
     gtk_main();
 
     if (app.program) glDeleteProgram(app.program);
-    g_free(app.shader_code); g_free(app.shader_title); g_free(app.shader_id); g_free(app.shader_path); g_free(app.constants_source); if (app.constants) g_ptr_array_free(app.constants, TRUE);
+    g_free(app.shader_code); g_free(app.shader_title); g_free(app.shader_id); g_free(app.shader_path); g_free(app.constants_source); g_free(app.pending_preview_source); g_free(app.pending_preview_title); g_free(app.pending_preview_id); if (app.constants) g_ptr_array_free(app.constants, TRUE);
     if (app.wallpaper_widgets) g_ptr_array_free(app.wallpaper_widgets, TRUE);
     curl_global_cleanup();
     return 0;

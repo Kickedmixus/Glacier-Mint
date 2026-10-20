@@ -73,10 +73,12 @@ typedef struct {
     GtkWidget *window, *notebook, *preview, *widget_canvas, *widget_preview, *widget_grid, *widget_settings_panel, *widget_settings_name, *widget_settings_font, *widget_settings_size, *widget_settings_width, *widget_settings_bold, *widget_settings_italic, *widget_settings_gradient, *widget_settings_color, *widget_settings_gradient_color, *widget_settings_box, *widget_settings_box_color, *widget_settings_border, *widget_settings_radius, *widget_settings_spacing, *widget_settings_stretch_x, *widget_settings_stretch_y, *results, *local_list, *status;
     GtkWidget *search, *api_key, *fps, *scale, *speed, *chroma_enable, *chroma_color, *chroma_smoothing, *chroma_opacity, *code_view, *browser, *browser_url, *constants_box, *toy_status;
     GtkWidget *widget_settings_scale, *widget_settings_accent, *widget_settings_secondary, *widget_settings_options, *vsync, *settings_status;
+    GtkWidget *window_style_preview, *window_style_enabled, *window_style_border_width, *window_style_radius, *window_style_opacity, *window_style_color, *window_style_gradient, *window_style_gradient_color, *window_style_gradient_angle, *window_style_status, *extension_status;
     int monitor_refresh;
     WidgetFeed *widget_feed;
     WidgetSnapshot widget_snapshot;
     char *shader_code, *shader_title, *shader_id, *shader_path, *constants_source;
+    char *pending_preview_source, *pending_preview_title, *pending_preview_id;
     GPtrArray *constants;
     GPtrArray *wallpaper_widgets;
     guint constants_update_id;
@@ -192,6 +194,15 @@ void beat_clock_update(BeatClock *clock, double dt, double now, const BeatState 
 
 void add_css(void);
 GtkWidget *build_ui(App *app);
+void load_window_styling(App *app);
+void window_styling_changed(GtkWidget *control, App *app);
+void apply_window_styling_clicked(GtkButton *button, App *app);
+gboolean gnome_window_extension_installed(void);
+gboolean cinnamon_window_extension_installed(void);
+int install_window_extension_files(void);
+void install_gnome_extension_clicked(GtkButton *button, App *app);
+void open_extension_manager_clicked(GtkButton *button, App *app);
+gboolean window_style_preview_draw(GtkWidget *widget, cairo_t *cr, App *app);
 int wallpaper_main(const char *path, int fps, gboolean vsync, int speed_percent, gboolean chroma_enabled, const float key[3], float smoothing, int opacity_percent);
 
 #endif
